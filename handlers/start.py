@@ -1,7 +1,14 @@
 import traceback
 import logging
 from pyrogram import Client, filters, enums
-from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid, PeerIdInvalid
+from pyrogram.errors import (
+    UserNotParticipant, 
+    MessageNotModified, 
+    ChatAdminRequired, 
+    ChannelInvalid, 
+    PeerIdInvalid,
+    ChannelPrivate  # Import the missing exception
+)
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import Config
 from database.db import (
@@ -101,19 +108,14 @@ async def handle_public_file_request(client, message, user_id, payload):
     owner_id = file_data['owner_id']
     owner_settings = await get_user(owner_id)
     
-    # --- NEW, ROBUST FSUB LOGIC ---
     fsub_channel = owner_settings.get('fsub_channel')
     if fsub_channel:
         try:
-            # First, check if the BOT has access to the channel.
-            # Using get_chat_member on "me" is a reliable way to check for access.
             await client.get_chat_member(chat_id=fsub_channel, user_id="me")
             
-            # If the above line didn't fail, the bot has access. Now, check the user.
             try:
                 await client.get_chat_member(chat_id=fsub_channel, user_id=user_id)
             except UserNotParticipant:
-                # This block now ONLY runs if the USER is not in the channel.
                 try: 
                     invite_link = await client.export_chat_invite_link(fsub_channel)
                 except Exception: 
@@ -121,24 +123,18 @@ async def handle_public_file_request(client, message, user_id, payload):
                 buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
                 return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
 
-        except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid) as e:
-            # This block now catches errors related to the BOT's access to the channel.
+        # --- FINAL FIX: Added ChannelPrivate to the exceptions list ---
+        except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
             logger.error(f"FSub channel error for owner {owner_id} (Channel: {fsub_channel}): {e}")
             
-            # Notify the bot owner that their FSub channel is broken.
             await client.send_message(
                 chat_id=owner_id,
-                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is no longer accessible. The bot might have been kicked, the channel was deleted, or it lost admin permissions.\n\nIt has been automatically disabled. Please go to settings to set a new one."
+                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is no longer accessible. The bot might have been kicked, the channel was deleted, or it lost permissions.\n\nIt has been automatically disabled. Please go to settings to set a new one."
             )
             
-            # Disable the broken setting in the database.
             await update_user(owner_id, "fsub_channel", None)
-            
-            # Allow the current end-user to proceed for a better experience.
             pass
-    # --- END OF FSUB LOGIC ---
-
-
+    
     shortener_enabled = owner_settings.get('shortener_enabled', True)
     shortener_mode = owner_settings.get('shortener_mode', 'each_time')
     
