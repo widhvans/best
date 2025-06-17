@@ -1,9 +1,11 @@
 import datetime
+import logging
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import Config
 
 client = AsyncIOMotorClient(Config.MONGO_URI)
 db = client[Config.DATABASE_NAME]
+logger = logging.getLogger(__name__)
 
 users = db['users']
 files = db['files']
@@ -29,17 +31,42 @@ async def add_user(user_id):
     await users.update_one({'user_id': user_id}, {"$setOnInsert": user_data}, upsert=True)
 
 
+# --- FIXED: More robust verification logic ---
 async def is_user_verified(requester_id: int, owner_id: int) -> bool:
-    """Checks if a user has a valid verification within the last 12 hours."""
-    verification = await verified_users.find_one({
-        'requester_id': requester_id,
-        'owner_id': owner_id
-    })
-    if verification and 'verified_at' in verification:
+    """
+    Checks if a user has a valid verification within the last 12 hours.
+    This version is more defensive against bad data.
+    """
+    try:
+        verification = await verified_users.find_one({
+            'requester_id': requester_id,
+            'owner_id': owner_id
+        })
+
+        # 1. If no document exists for the user, they are not verified.
+        if not verification:
+            return False
+            
+        # 2. If the document exists but is missing the timestamp, they are not verified.
+        if 'verified_at' not in verification:
+            return False
+            
+        # 3. If the timestamp is not a valid datetime object, they are not verified.
+        if not isinstance(verification['verified_at'], datetime.datetime):
+            return False
+
+        # 4. If all checks pass, compare the time.
         twelve_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=12)
         if verification['verified_at'] > twelve_hours_ago:
-            return True
-    return False
+            return True  # Verification is still valid
+        else:
+            return False # Verification has expired
+
+    except Exception as e:
+        # If any unexpected error occurs, default to NOT verified for safety.
+        logger.error(f"An error occurred in is_user_verified check: {e}")
+        return False
+
 
 async def add_user_verification(requester_id: int, owner_id: int):
     """Adds or updates a user's verification timestamp to the current UTC time."""
@@ -48,6 +75,8 @@ async def add_user_verification(requester_id: int, owner_id: int):
         {"$set": {'verified_at': datetime.datetime.utcnow()}},
         upsert=True
     )
+
+# --- (The rest of the file is unchanged) ---
 
 async def set_owner_db_channel(channel_id: int):
     await bot_settings.update_one({'_id': 'owner_db_config'}, {'$set': {'channel_id': channel_id}}, upsert=True)
