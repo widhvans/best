@@ -38,7 +38,8 @@ async def send_file(client, user_id, file_unique_id):
             chat_id=user_id,
             from_chat_id=owner_db_id,
             message_id=file_data['file_id'],
-            caption=caption
+            caption=caption,
+            parse_mode=enums.ParseMode.MARKDOWN
         )
     except Exception:
         logger.exception("Error in send_file function")
@@ -170,6 +171,7 @@ async def go_back_callback(client, query):
         await query.message.edit_text(
             text=menu_text, 
             reply_markup=menu_markup, 
+            parse_mode=enums.ParseMode.MARKDOWN,
             disable_web_page_preview=True # Prevent link previews in the menu
         )
     except MessageNotModified:
