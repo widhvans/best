@@ -10,7 +10,7 @@ from database.db import (
     get_user_file_count, add_footer_button, remove_footer_button,
     get_all_user_files, get_paginated_files, search_user_files
 )
-from utils.helpers import go_back_button, create_post, clean_filename, calculate_title_similarity
+from utils.helpers import go_back_button, get_main_menu, create_post, clean_filename, calculate_title_similarity, notify_and_remove_invalid_channel
 
 logger = logging.getLogger(__name__)
 ACTIVE_BACKUP_TASKS = set()
@@ -62,7 +62,6 @@ async def get_shortener_menu_parts(user_id):
     buttons.append([go_back_button(user_id).inline_keyboard[0][0]])
     return text, InlineKeyboardMarkup(buttons)
 
-
 async def get_poster_menu_parts(user_id):
     user = await get_user(user_id)
     is_enabled = user.get('show_poster', True)
@@ -77,11 +76,14 @@ async def get_fsub_menu_parts(client, user_id):
     fsub_ch = user.get('fsub_channel')
     text = "**📢 FSub Settings**\n\n"
     if fsub_ch:
-        try:
-            chat = await client.get_chat(fsub_ch)
-            text += f"Current FSub Channel: **{chat.title}**"
-        except:
-            text += f"Current FSub Channel ID: `{fsub_ch}` (Could not access)"
+        # We use the universal checker here too for consistency
+        is_valid = await notify_and_remove_invalid_channel(client, user_id, fsub_ch, "FSub")
+        if is_valid:
+            try:
+                chat = await client.get_chat(fsub_ch)
+                text += f"Current FSub Channel: **{chat.title}**"
+            except:
+                text += f"Current FSub Channel ID: `{fsub_ch}`"
     else:
         text += "No FSub channel is set."
     return text, InlineKeyboardMarkup([
@@ -318,7 +320,6 @@ async def manage_footer_handler(client, query):
     kb.append([InlineKeyboardButton("« Go Back", callback_data=f"go_back_{query.from_user.id}")])
     await safe_edit_message(query, text=text, reply_markup=InlineKeyboardMarkup(kb))
 
-# --- FIXED: Smarter URL validation ---
 @Client.on_callback_query(filters.regex("add_footer"))
 async def add_footer_handler(client, query):
     user_id = query.from_user.id
@@ -327,11 +328,9 @@ async def add_footer_handler(client, query):
         button_name_msg = await client.listen(chat_id=user_id, timeout=300)
         await prompt_msg.edit_text(f"OK. Now, send the URL for the '{button_name_msg.text}' button.", reply_markup=go_back_button(user_id))
         button_url_msg = await client.listen(chat_id=user_id, timeout=300)
-        
         button_url = button_url_msg.text.strip()
         if not button_url.startswith(("http://", "https://")):
             button_url = "https://" + button_url
-            
         await add_footer_button(user_id, button_name_msg.text, button_url)
         await button_name_msg.delete(); await button_url_msg.delete()
         await safe_edit_message(query, text="✅ New footer button added!", reply_markup=go_back_button(user_id))
@@ -345,22 +344,42 @@ async def remove_footer_handler(client, query):
     await query.answer("Button removed!", show_alert=True)
     await manage_footer_handler(client, query)
 
+# --- UPDATED: Handler now checks channels when the menu is opened ---
 @Client.on_callback_query(filters.regex(r"manage_(post|db)_ch"))
 async def manage_channels_handler(client, query):
     user_id, ch_type = query.from_user.id, query.data.split("_")[1]
     ch_type_key, ch_type_name = f"{ch_type}_channels", "Post" if ch_type == "post" else "Database"
-    channels = (await get_user(user_id)).get(ch_type_key, [])
+    
+    # Get a fresh copy of the channels after potentially being modified by the check
+    user_data = await get_user(user_id)
+    channels = user_data.get(ch_type_key, [])
+    
     text = f"**Manage Your {ch_type_name} Channels**\n\n"
     buttons = []
+    
+    # Create a list of valid channels first
+    valid_channels = []
     if channels:
-        text += "Here are your connected channels. Click to remove."
         for ch_id in channels:
-            try: chat = await client.get_chat(ch_id); buttons.append([InlineKeyboardButton(f"❌ {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
-            except: buttons.append([InlineKeyboardButton(f"❌ Unavailable ({ch_id})", callback_data=f"rm_{ch_type}_{ch_id}")])
-    else: text += "You haven't added any channels yet."
+            if await notify_and_remove_invalid_channel(client, user_id, ch_id, ch_type_name):
+                valid_channels.append(ch_id)
+    
+    if valid_channels:
+        text += "Here are your connected channels. Click to remove."
+        for ch_id in valid_channels:
+            try:
+                chat = await client.get_chat(ch_id)
+                buttons.append([InlineKeyboardButton(f"❌ {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
+            except:
+                # This case is unlikely now but good for safety
+                buttons.append([InlineKeyboardButton(f"❌ Unavailable ({ch_id})", callback_data=f"rm_{ch_type}_{ch_id}")])
+    else:
+        text += "You haven't added any channels yet."
+        
     buttons.append([InlineKeyboardButton("➕ Add New Channel", callback_data=f"add_{ch_type}_ch")])
-    buttons.append([InlineKeyboardButton("« Go Back", callback_data=f"manage_channels_menu")])
+    buttons.append([InlineKeyboardButton("« Go Back", callback_data="manage_channels_menu")])
     await safe_edit_message(query, text=text, reply_markup=InlineKeyboardMarkup(buttons))
+
 
 @Client.on_callback_query(filters.regex(r"rm_(post|db)_-?\d+"))
 async def remove_channel_handler(client, query):
@@ -392,7 +411,6 @@ async def add_channel_prompt(client, query):
     except Exception as e:
         await query.message.reply_text(f"An error occurred: {e}", reply_markup=go_back_button(user_id))
 
-# --- FIXED: Smarter URL validation ---
 @Client.on_callback_query(filters.regex("^set_filename_link$"))
 async def set_filename_link_handler(client, query):
     user_id = query.from_user.id
@@ -411,7 +429,6 @@ async def set_filename_link_handler(client, query):
     except:
         logger.exception("Error in set_filename_link_handler"); await safe_edit_message(query, text="An error occurred.", reply_markup=go_back_button(user_id))
 
-# --- FIXED: Smarter URL validation ---
 @Client.on_callback_query(filters.regex("^(set_fsub|set_download)$"))
 async def set_other_links_handler(client, query):
     user_id, action = query.from_user.id, query.data.split("_")[1]
