@@ -59,10 +59,12 @@ async def start_command(client, message):
                 if file_data:
                     owner_id = file_data['owner_id']
                     owner_settings = await get_user(owner_id)
+                    # Only add verification and notify if the mode was '12_hour'
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
-                        was_verified = await is_user_verified(user_id, owner_id)
+                        was_verified_before_this_click = await is_user_verified(user_id, owner_id)
                         await add_user_verification(user_id, owner_id)
-                        if not was_verified:
+                        # Only send notification on the first successful verification in a cycle
+                        if not was_verified_before_this_click:
                             await client.send_message(user_id, "✅ **Verification Successful!**\n\nFor the next 12 hours, you will get direct links from this user's channels without extra steps.")
                 
                 await send_file(client, user_id, file_unique_id)
@@ -90,7 +92,7 @@ async def start_command(client, message):
 
 
 async def handle_public_file_request(client, message, user_id, payload):
-    """Handles public links with the new robust FSub and Shortener Mode logic."""
+    """The final, robust handler for public links."""
     file_unique_id = payload.split("_", 1)[1]
     file_data = await get_file_by_unique_id(file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
@@ -116,44 +118,45 @@ async def handle_public_file_request(client, message, user_id, payload):
             await update_user(owner_id, "fsub_channel", None)
             pass
 
-    # --- NEW ROBUST LOGIC BLOCK ---
+    # --- FINAL ROBUST LOGIC FOR SHORTENER INTERFACE ---
+    
     shortener_enabled = owner_settings.get('shortener_enabled', True)
     shortener_mode = owner_settings.get('shortener_mode', 'each_time')
     
-    bypass_shortener = False 
-    
-    if not shortener_enabled:
-        # Highest priority: If the feature is off, always bypass.
-        bypass_shortener = True
-    else:
-        # If the feature is ON, then check the mode.
-        if shortener_mode == 'each_time':
-            # In 'Each Time' mode, we NEVER bypass.
-            bypass_shortener = False
-        elif shortener_mode == '12_hour':
-            # In '12 Hour' mode, we ONLY bypass if the user is already verified.
-            if await is_user_verified(user_id, owner_id):
-                bypass_shortener = True
-            else:
-                bypass_shortener = False
-    # --- END OF NEW LOGIC BLOCK ---
-
-
     final_delivery_link = f"https://t.me/{client.me.username}?start=finalget_{file_unique_id}"
-    buttons = []
     text = ""
+    buttons = []
 
-    if bypass_shortener:
-        text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click the button below to get your file directly."
-        buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
+    # CASE 1: The entire shortener feature is turned OFF.
+    if not shortener_enabled:
+        text = "✅ **Your link is ready!**\n\nClick the button below to get your file directly."
+        buttons.append([InlineKeyboardButton("➡️ Get Your File ⬅️", url=final_delivery_link)])
+
+    # CASE 2: The shortener feature is ON.
     else:
-        text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
-        shortened_link = await get_shortlink(final_delivery_link, owner_id)
-        buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
+        # Sub-case 2a: Mode is "Each Time".
+        if shortener_mode == 'each_time':
+            text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
+            shortened_link = await get_shortlink(final_delivery_link, owner_id)
+            buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
+        
+        # Sub-case 2b: Mode is "12 Hour Verify".
+        elif shortener_mode == '12_hour':
+            if await is_user_verified(user_id, owner_id):
+                # User is already verified, give them the direct link.
+                text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click the button below to get your file directly."
+                buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
+            else:
+                # User is NOT verified, send them through the shortener.
+                text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
+                shortened_link = await get_shortlink(final_delivery_link, owner_id)
+                buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
 
+    # Add the "How to Download" button if it exists, regardless of the case.
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
     
+    # Send the final composed message
     await message.reply_text(
         text, 
         reply_markup=InlineKeyboardMarkup(buttons),
