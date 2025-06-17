@@ -49,18 +49,16 @@ class Bot(Client):
             post_channels = user.get('post_channels', [])
             if not user or not post_channels: return
 
-            # --- RESTORED: Check channel validity before posting ---
+            # --- Check channel validity before posting ---
             valid_post_channels = []
             for channel_id in post_channels:
-                # The 'post' type must be lowercase to match the DB key "post_channels"
-                if await notify_and_remove_invalid_channel(self, user_id, channel_id, "post"):
+                if await notify_and_remove_invalid_channel(self, user_id, channel_id, "Post"):
                     valid_post_channels.append(channel_id)
             
             if not valid_post_channels:
                 logger.warning(f"User {user_id} has no valid post channels for batch '{batch_title}'.")
                 await self.send_message(user_id, f"⚠️ Could not post the batch for **{batch_title}** because you have no valid Post Channels configured. Please check your bot settings.")
                 return
-            # --- END OF RESTORED LOGIC ---
 
             for channel_id in valid_post_channels:
                 if not self.notification_flags.get(channel_id):
@@ -138,7 +136,6 @@ class Bot(Client):
                 logger.error(f"SEND_PROTECTION: An error occurred: {e}"); raise
 
     async def start_web_server(self):
-        """Initializes and starts the web server correctly."""
         self.web_app = web.Application()
         self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
         self.web_runner = web.AppRunner(self.web_app)
