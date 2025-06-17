@@ -22,7 +22,6 @@ async def send_file(client, user_id, file_unique_id):
             logger.error("Owner DB Channel not set, cannot send file.")
             return await client.send_message(user_id, "A configuration error occurred.")
 
-        # --- NEW: Create hyperlinked caption here ---
         owner_settings = await get_user(file_data['owner_id'])
         filename_url = owner_settings.get("filename_url")
         file_name = file_data.get('file_name', 'N/A')
@@ -52,10 +51,21 @@ async def start_command(client, message):
         payload = message.command[1]
         try:
             if payload.startswith("finalget_"):
+                # This is the final step after a user passes a shortener
                 _, file_unique_id = payload.split("_", 1)
                 await send_file(client, user_id, file_unique_id)
+
+            elif payload.startswith("ownerget_"):
+                # --- NEW: This is a private link for the file owner from /my_files ---
+                # It sends the file directly, skipping the intermediate page.
+                _, file_unique_id = payload.split("_", 1)
+                await send_file(client, user_id, file_unique_id)
+
             elif payload.startswith("get_"):
-                await handle_file_request(client, message, user_id, payload)
+                # This is a public link from a channel post.
+                # It will show the intermediate "Your file is almost ready!" page.
+                await handle_public_file_request(client, message, user_id, payload)
+
         except Exception:
             logger.exception("Error processing deep link in /start")
             await message.reply_text("Something went wrong.")
@@ -70,20 +80,18 @@ async def start_command(client, message):
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Let's Go 🚀", callback_data=f"go_back_{user_id}")]]))
 
-async def handle_file_request(client, message, user_id, payload):
+
+async def handle_public_file_request(client, message, user_id, payload):
+    """
+    This function now ONLY handles public links and will ALWAYS show the intermediate page.
+    """
     file_unique_id = payload.split("_", 1)[1]
     file_data = await get_file_by_unique_id(file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
     
     owner_id = file_data['owner_id']
-    
-    # --- REQUIREMENT 2: Direct File Access for Owner ---
-    if user_id == owner_id:
-        await send_file(client, user_id, file_unique_id)
-        return
-    # --- END OF MODIFICATION ---
-
     owner_settings = await get_user(owner_id)
+    
     fsub_channel = owner_settings.get('fsub_channel')
     if fsub_channel:
         try:
@@ -100,7 +108,6 @@ async def handle_file_request(client, message, user_id, payload):
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
     
-    # This interface is now skipped for the file owner
     await message.reply_text(
         "**Your file is almost ready!**\n\n"
         "1. Click the button above to complete the task.\n"
@@ -111,7 +118,8 @@ async def handle_file_request(client, message, user_id, payload):
 @Client.on_callback_query(filters.regex(r"^retry_"))
 async def retry_handler(client, query):
     await query.message.delete()
-    await handle_file_request(client, query.message, query.from_user.id, query.data.split("_", 1)[1])
+    # Call the correct handler for public file requests
+    await handle_public_file_request(client, query.message, query.from_user.id, query.data.split("_", 1)[1])
 
 @Client.on_callback_query(filters.regex(r"go_back_"))
 async def go_back_callback(client, query):
