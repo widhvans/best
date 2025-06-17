@@ -2,25 +2,27 @@ import re
 import base64
 import logging
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
 from config import Config
 from database.db import get_user, remove_from_list
 from features.poster import get_poster
 from thefuzz import fuzz
-from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid
 
 logger = logging.getLogger(__name__)
 
 FILES_PER_POST = 20
 
+# --- UPGRADED: Channel accessibility check now handles all exceptions ---
 async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
     """
     Checks if a channel is accessible. If not, notifies the user and removes it from DB.
     Returns True if channel is valid, False otherwise.
     """
     try:
-        await client.get_chat_member(channel_id, client.me.id)
+        # A lightweight check to see if the bot is in the channel.
+        await client.get_chat_member(channel_id, "me")
         return True
-    except (UserNotParticipant, ChatAdminRequired, ChannelInvalid):
+    except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
         channel_name = f"`{channel_id}`"
         try:
             chat = await client.get_chat(channel_id)
@@ -31,12 +33,11 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
         error_text = (
             f"⚠️ **Channel Inaccessible**\n\n"
             f"Your {channel_type.title()} Channel {channel_name} is no longer accessible. "
-            f"The bot may have been kicked, or the channel was deleted.\n\n"
+            f"The bot may have been kicked, the channel was deleted, or it lost permissions.\n\n"
             f"This channel has been automatically removed from your settings to prevent further errors."
         )
         try:
-            await client.send_message(user_id, error_text)
-            # The key in the DB is lowercase, e.g., "post_channels"
+            await client.send_message(user_id, error_text, parse_mode='md')
             db_key = f"{channel_type.lower()}_channels"
             await remove_from_list(user_id, db_key, channel_id)
         except Exception as notify_error:
@@ -45,6 +46,7 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
     except Exception as e:
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
         return False
+
 
 def calculate_title_similarity(title1: str, title2: str) -> float:
     return fuzz.token_sort_ratio(title1, title2) / 100.0
@@ -68,7 +70,7 @@ async def create_post(client, user_id, messages):
     user = await get_user(user_id)
     if not user: return []
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
-    if not first_media_obj: return []
+    if not first_media_obj: return [] 
     primary_title, year = clean_filename(first_media_obj.file_name)
     def similarity_sorter(msg):
         media_obj = getattr(msg, msg.media.value, None)
@@ -106,7 +108,6 @@ async def create_post(client, user_id, messages):
             posts.append((post_poster, final_caption, footer_keyboard))
         return posts
 
-# --- Rewritten Main Menu function ---
 async def get_main_menu(user_id):
     """
     Generates the main settings menu text and keyboard with the new layout.
@@ -116,7 +117,6 @@ async def get_main_menu(user_id):
     if not user_settings: 
         return "Could not find your settings.", InlineKeyboardMarkup([])
 
-    # The text is now simple and static again.
     menu_text = "⚙️ **Bot Settings**\n\nChoose an option below to configure the bot."
 
     shortener_text = "⚙️ Shortener Settings" if user_settings.get('shortener_url') else "🔗 Set Shortener"
@@ -128,13 +128,9 @@ async def get_main_menu(user_id):
         fsub_text = "📢 Set FSub"
         fsub_callback = "set_fsub"
 
-    # --- NEW Button Layout ---
     buttons = [
-        # New top-level button for managing channels
         [InlineKeyboardButton("🗂️ Manage Channels", callback_data="manage_channels_menu")],
-        # The rest of the buttons
         [InlineKeyboardButton(shortener_text, callback_data="shortener_menu"), InlineKeyboardButton("🔄 Backup Links", callback_data="backup_links")],
-        # "Filename Link" now opens its own menu
         [InlineKeyboardButton("✍️ Filename Link", callback_data="filename_link_menu"), InlineKeyboardButton("👣 Footer Buttons", callback_data="manage_footer")],
         [InlineKeyboardButton("🖼️ IMDb Poster", callback_data="poster_menu"), InlineKeyboardButton("📂 My Files", callback_data="my_files_1")],
         [InlineKeyboardButton(fsub_text, callback_data=fsub_callback)],
