@@ -1,3 +1,4 @@
+import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import Config
 
@@ -7,6 +8,7 @@ db = client[Config.DATABASE_NAME]
 users = db['users']
 files = db['files']
 bot_settings = db['bot_settings']
+verified_users = db['verified_users'] # New collection for 12-hour verification
 
 async def add_user(user_id):
     """Adds a new user to the database if they don't already exist."""
@@ -17,15 +19,40 @@ async def add_user(user_id):
         'shortener_url': None,
         'shortener_api': None,
         'fsub_channel': None,
-        'filename_url': None,  # Replaced custom_caption with this
+        'filename_url': None,
         'footer_buttons': [],
         'show_poster': True,
         'shortener_enabled': True,
-        'how_to_download_link': None
+        'how_to_download_link': None,
+        'shortener_mode': 'each_time'  # New field with default value
     }
     await users.update_one({'user_id': user_id}, {"$setOnInsert": user_data}, upsert=True)
 
-# (The rest of the file is unchanged, providing for completeness)
+# --- NEW FUNCTIONS FOR 12-HOUR VERIFICATION ---
+
+async def is_user_verified(requester_id: int, owner_id: int) -> bool:
+    """Checks if a user has a valid verification within the last 12 hours."""
+    verification = await verified_users.find_one({
+        'requester_id': requester_id,
+        'owner_id': owner_id
+    })
+    if verification:
+        # Check if the verification timestamp is older than 12 hours
+        twelve_hours_ago = datetime.datetime.now() - datetime.timedelta(hours=12)
+        if verification['verified_at'] > twelve_hours_ago:
+            return True  # Verification is still valid
+    return False
+
+async def add_user_verification(requester_id: int, owner_id: int):
+    """Adds or updates a user's verification timestamp to the current time."""
+    await verified_users.update_one(
+        {'requester_id': requester_id, 'owner_id': owner_id},
+        {"$set": {'verified_at': datetime.datetime.now()}},
+        upsert=True
+    )
+
+# --- (The rest of the file is unchanged) ---
+
 async def set_owner_db_channel(channel_id: int):
     await bot_settings.update_one({'_id': 'owner_db_config'}, {'$set': {'channel_id': channel_id}}, upsert=True)
 
