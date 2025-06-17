@@ -1,12 +1,14 @@
-
 import traceback
 import logging
 from pyrogram import Client, filters, enums
-from pyrogram.errors import UserNotParticipant, MessageNotModified
+from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import Config
-from database.db import add_user, get_file_by_unique_id, get_user, get_owner_db_channel
-from utils.helpers import get_main_menu, decode_link
+from database.db import (
+    add_user, get_file_by_unique_id, get_user, get_owner_db_channel,
+    is_user_verified, add_user_verification, update_user
+)
+from utils.helpers import get_main_menu
 from features.shortener import get_shortlink
 
 logger = logging.getLogger(__name__)
@@ -52,19 +54,14 @@ async def start_command(client, message):
         payload = message.command[1]
         try:
             if payload.startswith("finalget_"):
-                # This is the final step after a user passes a shortener
                 _, file_unique_id = payload.split("_", 1)
                 await send_file(client, user_id, file_unique_id)
 
             elif payload.startswith("ownerget_"):
-                # --- NEW: This is a private link for the file owner from /my_files ---
-                # It sends the file directly, skipping the intermediate page.
                 _, file_unique_id = payload.split("_", 1)
                 await send_file(client, user_id, file_unique_id)
 
             elif payload.startswith("get_"):
-                # This is a public link from a channel post.
-                # It will show the intermediate "Your file is almost ready!" page.
                 await handle_public_file_request(client, message, user_id, payload)
 
         except Exception:
@@ -83,9 +80,7 @@ async def start_command(client, message):
 
 
 async def handle_public_file_request(client, message, user_id, payload):
-    """
-    This function now ONLY handles public links and will ALWAYS show the intermediate page.
-    """
+    """Handles public links with FSub and the new Shortener Mode logic."""
     file_unique_id = payload.split("_", 1)[1]
     file_data = await get_file_by_unique_id(file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
@@ -102,10 +97,43 @@ async def handle_public_file_request(client, message, user_id, payload):
             except: invite_link = None
             buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
             return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
-    
+        except (ChatAdminRequired, ChannelInvalid) as e:
+            # --- NEW: Notify owner if FSub channel is inaccessible ---
+            logger.error(f"FSub channel error for owner {owner_id}: {e}")
+            await client.send_message(
+                chat_id=owner_id,
+                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is inaccessible. The bot might have been kicked or lost admin permissions. It has been disabled. Please set a new one in settings."
+            )
+            await update_user(owner_id, "fsub_channel", None) # Disable broken FSub
+            # Allow the user to proceed without FSub check
+            pass
+
+    # --- NEW: Shortener Mode Logic ---
+    shortener_enabled = owner_settings.get('shortener_enabled', True)
+    shortener_mode = owner_settings.get('shortener_mode', 'each_time')
+    bypass_shortener = False
+
+    if not shortener_enabled:
+        bypass_shortener = True
+    elif shortener_mode == '12_hour':
+        if await is_user_verified(user_id, owner_id):
+            bypass_shortener = True
+
     final_delivery_link = f"https://t.me/{client.me.username}?start=finalget_{file_unique_id}"
-    shortened_link = await get_shortlink(final_delivery_link, owner_id)
-    buttons = [[InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)]]
+    buttons = []
+
+    if bypass_shortener:
+        # User is verified or shortener is off, send the direct final link
+        buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=final_delivery_link)])
+    else:
+        # User needs to go through the shortener
+        if shortener_mode == '12_hour':
+            # Record the verification time before sending them to the shortener
+            await add_user_verification(user_id, owner_id)
+        
+        shortened_link = await get_shortlink(final_delivery_link, owner_id)
+        buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
+
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
     
@@ -116,10 +144,10 @@ async def handle_public_file_request(client, message, user_id, payload):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+
 @Client.on_callback_query(filters.regex(r"^retry_"))
 async def retry_handler(client, query):
     await query.message.delete()
-    # Call the correct handler for public file requests
     await handle_public_file_request(client, query.message, query.from_user.id, query.data.split("_", 1)[1])
 
 @Client.on_callback_query(filters.regex(r"go_back_"))
