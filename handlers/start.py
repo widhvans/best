@@ -54,18 +54,14 @@ async def start_command(client, message):
         payload = message.command[1]
         try:
             if payload.startswith("finalget_"):
-                # --- FIXED: Verification is now logged here, AFTER success ---
                 _, file_unique_id = payload.split("_", 1)
                 file_data = await get_file_by_unique_id(file_unique_id)
                 if file_data:
                     owner_id = file_data['owner_id']
                     owner_settings = await get_user(owner_id)
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
-                        # Check if user was already verified before this click
                         was_verified = await is_user_verified(user_id, owner_id)
-                        # Add/update their verification timestamp
                         await add_user_verification(user_id, owner_id)
-                        # If they were NOT verified before, send a one-time notification
                         if not was_verified:
                             await client.send_message(user_id, "✅ **Verification Successful!**\n\nFor the next 12 hours, you will get direct links from this user's channels without extra steps.")
                 
@@ -94,7 +90,7 @@ async def start_command(client, message):
 
 
 async def handle_public_file_request(client, message, user_id, payload):
-    """Handles public links with FSub and the new Shortener Mode logic."""
+    """Handles public links with the new robust FSub and Shortener Mode logic."""
     file_unique_id = payload.split("_", 1)[1]
     file_data = await get_file_by_unique_id(file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
@@ -120,26 +116,37 @@ async def handle_public_file_request(client, message, user_id, payload):
             await update_user(owner_id, "fsub_channel", None)
             pass
 
+    # --- NEW ROBUST LOGIC BLOCK ---
     shortener_enabled = owner_settings.get('shortener_enabled', True)
     shortener_mode = owner_settings.get('shortener_mode', 'each_time')
-    bypass_shortener = False
-
+    
+    bypass_shortener = False 
+    
     if not shortener_enabled:
+        # Highest priority: If the feature is off, always bypass.
         bypass_shortener = True
-    elif shortener_mode == '12_hour':
-        if await is_user_verified(user_id, owner_id):
-            bypass_shortener = True
+    else:
+        # If the feature is ON, then check the mode.
+        if shortener_mode == 'each_time':
+            # In 'Each Time' mode, we NEVER bypass.
+            bypass_shortener = False
+        elif shortener_mode == '12_hour':
+            # In '12 Hour' mode, we ONLY bypass if the user is already verified.
+            if await is_user_verified(user_id, owner_id):
+                bypass_shortener = True
+            else:
+                bypass_shortener = False
+    # --- END OF NEW LOGIC BLOCK ---
+
 
     final_delivery_link = f"https://t.me/{client.me.username}?start=finalget_{file_unique_id}"
     buttons = []
     text = ""
 
     if bypass_shortener:
-        # --- NEW: Interface for verified users ---
         text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click the button below to get your file directly."
         buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
     else:
-        # --- Original interface for unverified users ---
         text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
         shortened_link = await get_shortlink(final_delivery_link, owner_id)
         buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
@@ -147,8 +154,11 @@ async def handle_public_file_request(client, message, user_id, payload):
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
     
-    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
+    await message.reply_text(
+        text, 
+        reply_markup=InlineKeyboardMarkup(buttons),
+        disable_web_page_preview=True
+    )
 
 @Client.on_callback_query(filters.regex(r"^retry_"))
 async def retry_handler(client, query):
