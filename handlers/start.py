@@ -6,7 +6,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import Config
 from database.db import (
     add_user, get_file_by_unique_id, get_user, get_owner_db_channel,
-    is_user_verified, add_user_verification, update_user
+    is_user_verified, update_user, claim_verification_for_file
 )
 from utils.helpers import get_main_menu
 from features.shortener import get_shortlink
@@ -55,17 +55,20 @@ async def start_command(client, message):
         try:
             if payload.startswith("finalget_"):
                 _, file_unique_id = payload.split("_", 1)
+                
+                # --- NEW LOGIC: Attempt to claim verification from the file ---
                 file_data = await get_file_by_unique_id(file_unique_id)
                 if file_data:
                     owner_id = file_data['owner_id']
                     owner_settings = await get_user(owner_id)
-                    # Only add verification and notify if the mode was '12_hour'
+                    
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
-                        was_verified_before_this_click = await is_user_verified(user_id, owner_id)
-                        await add_user_verification(user_id, owner_id)
-                        # Only send notification on the first successful verification in a cycle
-                        if not was_verified_before_this_click:
-                            await client.send_message(user_id, "✅ **Verification Successful!**\n\nFor the next 12 hours, you will get direct links from this user's channels without extra steps.")
+                        # This function now handles the single-use logic.
+                        # It will only return True for the very first user who completes this link.
+                        claim_successful = await claim_verification_for_file(file_unique_id, user_id, owner_id)
+                        
+                        if claim_successful:
+                            await client.send_message(user_id, "✅ **Verification Successful!**\n\nThis link has now been used. For the next 12 hours, you will get direct links from this user's channels without extra steps.")
                 
                 await send_file(client, user_id, file_unique_id)
 
@@ -118,8 +121,6 @@ async def handle_public_file_request(client, message, user_id, payload):
             await update_user(owner_id, "fsub_channel", None)
             pass
 
-    # --- FINAL ROBUST LOGIC FOR SHORTENER INTERFACE ---
-    
     shortener_enabled = owner_settings.get('shortener_enabled', True)
     shortener_mode = owner_settings.get('shortener_mode', 'each_time')
     
@@ -127,37 +128,27 @@ async def handle_public_file_request(client, message, user_id, payload):
     text = ""
     buttons = []
 
-    # CASE 1: The entire shortener feature is turned OFF.
     if not shortener_enabled:
         text = "✅ **Your link is ready!**\n\nClick the button below to get your file directly."
         buttons.append([InlineKeyboardButton("➡️ Get Your File ⬅️", url=final_delivery_link)])
-
-    # CASE 2: The shortener feature is ON.
     else:
-        # Sub-case 2a: Mode is "Each Time".
         if shortener_mode == 'each_time':
             text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
             shortened_link = await get_shortlink(final_delivery_link, owner_id)
             buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
         
-        # Sub-case 2b: Mode is "12 Hour Verify".
         elif shortener_mode == '12_hour':
             if await is_user_verified(user_id, owner_id):
-                # User is already verified, give them the direct link.
                 text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click the button below to get your file directly."
                 buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
             else:
-                # User is NOT verified, they must go through the shortener with the NEW text.
-                # --- THIS IS THE MODIFIED TEXT AS PER YOUR REQUEST ---
                 text = "**One-Time Verification Required**\n\nTo get direct file access for the next 12 hours, please complete this one-time verification step by clicking the button below."
                 shortened_link = await get_shortlink(final_delivery_link, owner_id)
                 buttons.append([InlineKeyboardButton("➡️ Click to Verify (12 Hours) ⬅️", url=shortened_link)])
 
-    # Add the "How to Download" button if it exists, regardless of the case.
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
     
-    # Send the final composed message
     await message.reply_text(
         text, 
         reply_markup=InlineKeyboardMarkup(buttons),
