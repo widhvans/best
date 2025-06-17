@@ -18,7 +18,6 @@ ACTIVE_BACKUP_TASKS = set()
 async def safe_edit_message(query, *args, **kwargs):
     """A helper function to safely edit messages and handle common errors."""
     try:
-        # Always use Markdown parsing for consistency
         if 'parse_mode' not in kwargs:
             kwargs['parse_mode'] = ParseMode.MARKDOWN
         await query.message.edit_text(*args, **kwargs)
@@ -37,7 +36,6 @@ async def safe_edit_message(query, *args, **kwargs):
 # --- Helper functions to build dynamic menus ---
 
 async def get_shortener_menu_parts(user_id):
-    """Builds the text and keyboard for the shortener settings menu."""
     user = await get_user(user_id)
     is_enabled = user.get('shortener_enabled', True)
     shortener_url = user.get('shortener_url')
@@ -320,6 +318,7 @@ async def manage_footer_handler(client, query):
     kb.append([InlineKeyboardButton("« Go Back", callback_data=f"go_back_{query.from_user.id}")])
     await safe_edit_message(query, text=text, reply_markup=InlineKeyboardMarkup(kb))
 
+# --- FIXED: Smarter URL validation ---
 @Client.on_callback_query(filters.regex("add_footer"))
 async def add_footer_handler(client, query):
     user_id = query.from_user.id
@@ -328,9 +327,12 @@ async def add_footer_handler(client, query):
         button_name_msg = await client.listen(chat_id=user_id, timeout=300)
         await prompt_msg.edit_text(f"OK. Now, send the URL for the '{button_name_msg.text}' button.", reply_markup=go_back_button(user_id))
         button_url_msg = await client.listen(chat_id=user_id, timeout=300)
-        if not button_url_msg.text.startswith(("http://", "https://")):
-            return await button_url_msg.reply("Invalid URL.", reply_markup=go_back_button(user_id))
-        await add_footer_button(user_id, button_name_msg.text, button_url_msg.text)
+        
+        button_url = button_url_msg.text.strip()
+        if not button_url.startswith(("http://", "https://")):
+            button_url = "https://" + button_url
+            
+        await add_footer_button(user_id, button_name_msg.text, button_url)
         await button_name_msg.delete(); await button_url_msg.delete()
         await safe_edit_message(query, text="✅ New footer button added!", reply_markup=go_back_button(user_id))
     except asyncio.TimeoutError: await safe_edit_message(query, text="❗️ **Timeout:** Cancelled.", reply_markup=go_back_button(user_id))
@@ -390,21 +392,26 @@ async def add_channel_prompt(client, query):
     except Exception as e:
         await query.message.reply_text(f"An error occurred: {e}", reply_markup=go_back_button(user_id))
 
+# --- FIXED: Smarter URL validation ---
 @Client.on_callback_query(filters.regex("^set_filename_link$"))
 async def set_filename_link_handler(client, query):
     user_id = query.from_user.id
     try:
         prompt = await query.message.edit_text("Please send the full URL you want your filenames to link to.", reply_markup=go_back_button(user_id))
         response = await client.listen(chat_id=user_id, timeout=300, filters=filters.text)
-        if not response.text.startswith(("http://", "https://")):
-            return await response.reply("This is not a valid URL.", reply_markup=go_back_button(user_id))
-        await update_user(user_id, "filename_url", response.text)
+        
+        url_text = response.text.strip()
+        if not url_text.startswith(("http://", "https://")):
+            url_text = "https://" + url_text
+            
+        await update_user(user_id, "filename_url", url_text)
         await response.reply_text("✅ Filename link updated!", reply_markup=go_back_button(user_id))
         await prompt.delete()
     except asyncio.TimeoutError: await safe_edit_message(query, text="❗️ **Timeout:** Cancelled.", reply_markup=go_back_button(user_id))
     except:
         logger.exception("Error in set_filename_link_handler"); await safe_edit_message(query, text="An error occurred.", reply_markup=go_back_button(user_id))
 
+# --- FIXED: Smarter URL validation ---
 @Client.on_callback_query(filters.regex("^(set_fsub|set_download)$"))
 async def set_other_links_handler(client, query):
     user_id, action = query.from_user.id, query.data.split("_")[1]
@@ -413,12 +420,16 @@ async def set_other_links_handler(client, query):
     try:
         prompt = await query.message.edit_text(prompt_text, reply_markup=go_back_button(user_id))
         response = await client.listen(chat_id=user_id, timeout=300, filters=filters.forwarded if action == "fsub" else filters.text)
+        
+        value = None
         if action == "fsub":
             if not response.forward_from_chat: return await response.reply("Not a valid forwarded message.", reply_markup=go_back_button(user_id))
             value = response.forward_from_chat.id
-        else:
-            if not response.text.startswith(("http://", "https://")): return await response.reply("Invalid URL.", reply_markup=go_back_button(user_id))
-            value = response.text
+        else: # action == "download"
+            value = response.text.strip()
+            if not value.startswith(("http://", "https://")):
+                value = "https://" + value
+
         await update_user(user_id, key, value)
         await response.reply("✅ Settings updated!", reply_markup=go_back_button(user_id))
         await prompt.delete()
