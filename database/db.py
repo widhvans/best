@@ -30,43 +30,21 @@ async def add_user(user_id):
     }
     await users.update_one({'user_id': user_id}, {"$setOnInsert": user_data}, upsert=True)
 
-
-# --- FIXED: More robust verification logic ---
 async def is_user_verified(requester_id: int, owner_id: int) -> bool:
-    """
-    Checks if a user has a valid verification within the last 12 hours.
-    This version is more defensive against bad data.
-    """
+    """Checks if a user has a valid verification within the last 12 hours."""
     try:
         verification = await verified_users.find_one({
             'requester_id': requester_id,
             'owner_id': owner_id
         })
-
-        # 1. If no document exists for the user, they are not verified.
-        if not verification:
-            return False
-            
-        # 2. If the document exists but is missing the timestamp, they are not verified.
-        if 'verified_at' not in verification:
-            return False
-            
-        # 3. If the timestamp is not a valid datetime object, they are not verified.
-        if not isinstance(verification['verified_at'], datetime.datetime):
+        if not verification or 'verified_at' not in verification or not isinstance(verification['verified_at'], datetime.datetime):
             return False
 
-        # 4. If all checks pass, compare the time.
         twelve_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=12)
-        if verification['verified_at'] > twelve_hours_ago:
-            return True  # Verification is still valid
-        else:
-            return False # Verification has expired
-
+        return verification['verified_at'] > twelve_hours_ago
     except Exception as e:
-        # If any unexpected error occurs, default to NOT verified for safety.
         logger.error(f"An error occurred in is_user_verified check: {e}")
         return False
-
 
 async def add_user_verification(requester_id: int, owner_id: int):
     """Adds or updates a user's verification timestamp to the current UTC time."""
@@ -75,6 +53,33 @@ async def add_user_verification(requester_id: int, owner_id: int):
         {"$set": {'verified_at': datetime.datetime.utcnow()}},
         upsert=True
     )
+
+# --- NEW FUNCTION FOR SINGLE-USE VERIFICATION ---
+async def claim_verification_for_file(file_unique_id: str, requester_id: int, owner_id: int) -> bool:
+    """
+    Tries to claim a 12-hour verification from a specific file. A file can only grant
+    verification once. This prevents multiple users from getting verified from the same link.
+    Returns True if the claim was successful, False otherwise.
+    """
+    # This query finds a file that has NOT been claimed yet.
+    unclaimed_file_query = {'file_unique_id': file_unique_id, 'verification_claimed': {'$ne': True}}
+    
+    # Atomically find an unclaimed file and mark it as claimed.
+    result = await files.update_one(
+        unclaimed_file_query,
+        {'$set': {'verification_claimed': True}}
+    )
+    
+    # If `modified_count` is greater than 0, it means we successfully found and updated the file.
+    # This user is the first one.
+    if result.modified_count > 0:
+        # Now, grant the 12-hour pass to this specific user.
+        await add_user_verification(requester_id, owner_id)
+        return True
+        
+    # If `modified_count` is 0, it means the file was already claimed by someone else.
+    return False
+
 
 # --- (The rest of the file is unchanged) ---
 
@@ -96,6 +101,7 @@ async def save_file_data(owner_id, original_message, copied_message):
         'file_name': original_media.file_name,
         'file_size': original_media.file_size,
         'raw_link': raw_link
+        # Note: 'verification_claimed' will be added automatically when a file is claimed.
     }
     await files.update_one(
         {'owner_id': owner_id, 'file_unique_id': original_media.file_unique_id},
