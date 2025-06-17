@@ -74,7 +74,15 @@ async def handle_file_request(client, message, user_id, payload):
     file_unique_id = payload.split("_", 1)[1]
     file_data = await get_file_by_unique_id(file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
+    
     owner_id = file_data['owner_id']
+    
+    # --- REQUIREMENT 2: Direct File Access for Owner ---
+    if user_id == owner_id:
+        await send_file(client, user_id, file_unique_id)
+        return
+    # --- END OF MODIFICATION ---
+
     owner_settings = await get_user(owner_id)
     fsub_channel = owner_settings.get('fsub_channel')
     if fsub_channel:
@@ -91,6 +99,8 @@ async def handle_file_request(client, message, user_id, payload):
     buttons = [[InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)]]
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
+    
+    # This interface is now skipped for the file owner
     await message.reply_text(
         "**Your file is almost ready!**\n\n"
         "1. Click the button above to complete the task.\n"
