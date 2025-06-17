@@ -9,7 +9,6 @@ from database.db import (
     get_user_file_count, add_footer_button, remove_footer_button,
     get_all_user_files, get_paginated_files, search_user_files
 )
-# The old, incorrect import is removed. These are the correct ones:
 from utils.helpers import go_back_button, get_main_menu, create_post, clean_filename, calculate_title_similarity
 
 logger = logging.getLogger(__name__)
@@ -31,8 +30,66 @@ async def safe_edit_message(query, *args, **kwargs):
         except:
             pass
 
-# --- (All sub-menu and other settings handlers are unchanged) ---
-# ...
+# --- Helper functions to build dynamic menus ---
+
+async def get_shortener_menu_parts(user_id):
+    """Builds the text and keyboard for the shortener settings menu."""
+    user = await get_user(user_id)
+    is_enabled = user.get('shortener_enabled', True)
+    shortener_url = user.get('shortener_url')
+    shortener_mode = user.get('shortener_mode', 'each_time')
+
+    text = f"**🔗 Shortener Settings**\n\nYour shortener is currently **{'ON' if is_enabled else 'OFF'}**."
+    if shortener_url:
+        text += f"\n**Domain:** `{shortener_url}`"
+    
+    mode_text = "Each Time" if shortener_mode == 'each_time' else "12 Hour Verify"
+    text += f"\n**Verification Mode:** `{mode_text}`\n\nChoose an option to configure."
+    
+    buttons = [
+        [InlineKeyboardButton(f"Turn Shortener {'OFF' if is_enabled else 'ON'}", callback_data="toggle_shortener")]
+    ]
+
+    if shortener_mode == 'each_time':
+        buttons.append([InlineKeyboardButton("🔄 Switch to 12 Hour Verify", callback_data="toggle_smode_12_hour")])
+    else:
+        buttons.append([InlineKeyboardButton("🔄 Switch to Each Time", callback_data="toggle_smode_each_time")])
+        
+    buttons.append([InlineKeyboardButton("✏️ Set/Edit API & Domain", callback_data="set_shortener")])
+    buttons.append([go_back_button(user_id).inline_keyboard[0][0]])
+    
+    return text, InlineKeyboardMarkup(buttons)
+
+async def get_poster_menu_parts(user_id):
+    """Builds the text and keyboard for the poster settings menu."""
+    user = await get_user(user_id)
+    is_enabled = user.get('show_poster', True)
+    text = f"**🖼️ Poster Settings**\n\nIMDb Poster is currently **{'ON' if is_enabled else 'OFF'}**."
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"Turn Poster {'OFF' if is_enabled else 'ON'}", callback_data="toggle_poster")],
+        [go_back_button(user_id).inline_keyboard[0][0]]
+    ])
+
+async def get_fsub_menu_parts(client, user_id):
+    """Builds the text and keyboard for the FSub settings menu."""
+    user = await get_user(user_id)
+    fsub_ch = user.get('fsub_channel')
+    text = "**📢 FSub Settings**\n\n"
+    if fsub_ch:
+        try:
+            chat = await client.get_chat(fsub_ch)
+            text += f"Current FSub Channel: **{chat.title}**"
+        except:
+            text += f"Current FSub Channel ID: `{fsub_ch}` (Could not access)"
+    else:
+        text += "No FSub channel is set."
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Set/Change FSub", callback_data="set_fsub")],
+        [go_back_button(user_id).inline_keyboard[0][0]]
+    ])
+
+# --- Main Callback Handlers ---
+
 @Client.on_callback_query(filters.regex(r"^(shortener|poster|fsub)_menu$"))
 async def settings_submenu_handler(client, query):
     user_id = query.from_user.id
@@ -43,16 +100,34 @@ async def settings_submenu_handler(client, query):
     else: return
     await safe_edit_message(query, text=text, reply_markup=markup)
 
-@Client.on_callback_query(filters.regex(r"toggle_(shortener|poster)"))
-async def toggle_handler(client, query):
-    user_id, feature = query.from_user.id, query.data.split("_")[1]
-    key = "shortener_enabled" if feature == "shortener" else "show_poster"
+@Client.on_callback_query(filters.regex(r"toggle_shortener$"))
+async def toggle_shortener_handler(client, query):
+    user_id = query.from_user.id
     user = await get_user(user_id)
-    new_status = not user.get(key, True)
-    await update_user(user_id, key, new_status)
-    await query.answer(f"{feature.title()} is now {'ON' if new_status else 'OFF'}", show_alert=True)
-    if feature == "shortener": text, markup = await get_shortener_menu_parts(user_id)
-    else: text, markup = await get_poster_menu_parts(user_id)
+    new_status = not user.get('shortener_enabled', True)
+    await update_user(user_id, 'shortener_enabled', new_status)
+    await query.answer(f"Shortener is now {'ON' if new_status else 'OFF'}", show_alert=True)
+    text, markup = await get_shortener_menu_parts(user_id)
+    await safe_edit_message(query, text=text, reply_markup=markup)
+
+@Client.on_callback_query(filters.regex(r"toggle_smode_(.+)"))
+async def toggle_shortener_mode_handler(client, query):
+    user_id = query.from_user.id
+    new_mode = query.data.split("_")[-1]  # '12_hour' or 'each_time'
+    await update_user(user_id, 'shortener_mode', new_mode)
+    mode_text = "12 Hour Verify" if new_mode == "12_hour" else "Each Time"
+    await query.answer(f"Shortener mode set to: {mode_text}", show_alert=True)
+    text, markup = await get_shortener_menu_parts(user_id)
+    await safe_edit_message(query, text=text, reply_markup=markup)
+
+@Client.on_callback_query(filters.regex(r"toggle_poster$"))
+async def toggle_poster_handler(client, query):
+    user_id = query.from_user.id
+    user = await get_user(user_id)
+    new_status = not user.get('show_poster', True)
+    await update_user(user_id, 'show_poster', new_status)
+    await query.answer(f"Poster is now {'ON' if new_status else 'OFF'}", show_alert=True)
+    text, markup = await get_poster_menu_parts(user_id)
     await safe_edit_message(query, text=text, reply_markup=markup)
 
 @Client.on_callback_query(filters.regex(r"my_files_(\d+)"))
@@ -70,7 +145,6 @@ async def my_files_handler(client, query):
             if not files_on_page: text += "No more files found on this page."
             else:
                 for file in files_on_page:
-                    # --- MODIFIED LINK FOR DIRECT ACCESS ---
                     deep_link = f"https://t.me/{client.me.username}?start=ownerget_{file['file_unique_id']}"
                     text += f"**File:** `{file['file_name']}`\n**Link:** [Click Here to Get File]({deep_link})\n\n"
         buttons, nav_row = [], []
@@ -90,7 +164,6 @@ async def _format_and_send_search_results(client, query, user_id, search_query, 
     if not files_list: text += "No files found for your query."
     else:
         for file in files_list:
-            # --- MODIFIED LINK FOR DIRECT ACCESS ---
             deep_link = f"https://t.me/{client.me.username}?start=ownerget_{file['file_unique_id']}"
             text += f"**File:** `{file['file_name']}`\n**Link:** [Click Here to Get File]({deep_link})\n\n"
     buttons, nav_row = [], []
@@ -149,16 +222,12 @@ async def start_backup_process(client, query):
         all_file_docs = await (await get_all_user_files(user_id)).to_list(length=None)
         if not all_file_docs:
             return await safe_edit_message(query, text="You have no files to back up.", reply_markup=go_back_button(user_id))
-
         await query.message.edit_text("⏳ `Step 2/3:` Intelligently grouping files by similarity...")
-        
-        # --- NEW FUZZY BATCHING FOR BACKUP ---
         batches = []
         for doc in all_file_docs:
             if not doc.get('file_name'): continue
             doc_title, _ = clean_filename(doc['file_name'])
             if not doc_title: continue
-
             added_to_existing_batch = False
             for batch in batches:
                 batch_title, _ = clean_filename(batch[0]['file_name'])
@@ -168,11 +237,8 @@ async def start_backup_process(client, query):
                     break
             if not added_to_existing_batch:
                 batches.append([doc])
-        # --- END OF NEW LOGIC ---
-
         total_batches = len(batches)
         await safe_edit_message(query, text=f"✅ `Step 2/3:` Found **{total_batches}** unique posts to create. Starting backup...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Backup", callback_data=f"cancel_backup_{user_id}")]]))
-        
         for i, file_docs_batch in enumerate(batches):
             if user_id not in ACTIVE_BACKUP_TASKS:
                 await safe_edit_message(query, text="❌ Backup cancelled by user.", reply_markup=go_back_button(user_id)); return
@@ -181,19 +247,16 @@ async def start_backup_process(client, query):
                 source_chat_id = int("-100" + file_docs_batch[0]['raw_link'].split('/')[-2])
                 file_messages = await client.get_messages(source_chat_id, message_ids)
                 posts_to_send = await create_post(client, user_id, file_messages)
-                
                 for post in posts_to_send:
                     poster, caption, footer = post
                     if poster: await client.send_photo(channel_id, photo=poster, caption=caption, reply_markup=footer)
                     else: await client.send_message(channel_id, caption, reply_markup=footer, disable_web_page_preview=True)
                     await asyncio.sleep(3)
-                
                 progress_text = f"🔄 `Step 3/3:` Progress: {i + 1} / {total_batches} batches processed."
                 await safe_edit_message(query, text=progress_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Backup", callback_data=f"cancel_backup_{user_id}")]]))
             except Exception as e:
                 logger.exception(f"Failed to post batch during backup for user {user_id}.")
                 await client.send_message(user_id, f"Failed to back up a batch. Error: {e}")
-        
         await query.message.delete()
         await client.send_message(user_id, "✅ **Backup Complete!**", reply_markup=go_back_button(user_id))
     except Exception as e:
@@ -276,7 +339,7 @@ async def add_channel_prompt(client, query):
        (ch_type_short == 'post' and len(user_settings.get(ch_type_key, [])) >= 3):
         return await query.answer("You have reached the channel limit for this type.", show_alert=True)
     try:
-        question = await query.message.reply_text(f"Forward a message from your target **{ch_type_name} Channel**.", reply_markup=go_back_button(user_id))
+        question = await query.message.edit_text(f"Forward a message from your target **{ch_type_name} Channel**.", reply_markup=go_back_button(user_id))
         response = await client.listen(chat_id=user_id, filters=filters.forwarded, timeout=300)
         if response.forward_from_chat:
             await add_to_list(user_id, ch_type_key, response.forward_from_chat.id)
