@@ -147,10 +147,11 @@ async def handle_public_file_request(client, message, user_id, payload):
                 text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click the button below to get your file directly."
                 buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
             else:
-                # User is NOT verified, send them through the shortener.
-                text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
+                # User is NOT verified, they must go through the shortener with the NEW text.
+                # --- THIS IS THE MODIFIED TEXT AS PER YOUR REQUEST ---
+                text = "**One-Time Verification Required**\n\nTo get direct file access for the next 12 hours, please complete this one-time verification step by clicking the button below."
                 shortened_link = await get_shortlink(final_delivery_link, owner_id)
-                buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
+                buttons.append([InlineKeyboardButton("➡️ Click to Verify (12 Hours) ⬅️", url=shortened_link)])
 
     # Add the "How to Download" button if it exists, regardless of the case.
     if owner_settings.get("how_to_download_link"):
