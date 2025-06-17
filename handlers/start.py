@@ -54,7 +54,21 @@ async def start_command(client, message):
         payload = message.command[1]
         try:
             if payload.startswith("finalget_"):
+                # --- FIXED: Verification is now logged here, AFTER success ---
                 _, file_unique_id = payload.split("_", 1)
+                file_data = await get_file_by_unique_id(file_unique_id)
+                if file_data:
+                    owner_id = file_data['owner_id']
+                    owner_settings = await get_user(owner_id)
+                    if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
+                        # Check if user was already verified before this click
+                        was_verified = await is_user_verified(user_id, owner_id)
+                        # Add/update their verification timestamp
+                        await add_user_verification(user_id, owner_id)
+                        # If they were NOT verified before, send a one-time notification
+                        if not was_verified:
+                            await client.send_message(user_id, "✅ **Verification Successful!**\n\nFor the next 12 hours, you will get direct links from this user's channels without extra steps.")
+                
                 await send_file(client, user_id, file_unique_id)
 
             elif payload.startswith("ownerget_"):
@@ -98,17 +112,14 @@ async def handle_public_file_request(client, message, user_id, payload):
             buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
             return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
         except (ChatAdminRequired, ChannelInvalid) as e:
-            # --- NEW: Notify owner if FSub channel is inaccessible ---
             logger.error(f"FSub channel error for owner {owner_id}: {e}")
             await client.send_message(
                 chat_id=owner_id,
                 text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is inaccessible. The bot might have been kicked or lost admin permissions. It has been disabled. Please set a new one in settings."
             )
-            await update_user(owner_id, "fsub_channel", None) # Disable broken FSub
-            # Allow the user to proceed without FSub check
+            await update_user(owner_id, "fsub_channel", None)
             pass
 
-    # --- NEW: Shortener Mode Logic ---
     shortener_enabled = owner_settings.get('shortener_enabled', True)
     shortener_mode = owner_settings.get('shortener_mode', 'each_time')
     bypass_shortener = False
@@ -121,28 +132,22 @@ async def handle_public_file_request(client, message, user_id, payload):
 
     final_delivery_link = f"https://t.me/{client.me.username}?start=finalget_{file_unique_id}"
     buttons = []
+    text = ""
 
     if bypass_shortener:
-        # User is verified or shortener is off, send the direct final link
-        buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=final_delivery_link)])
+        # --- NEW: Interface for verified users ---
+        text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click the button below to get your file directly."
+        buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
     else:
-        # User needs to go through the shortener
-        if shortener_mode == '12_hour':
-            # Record the verification time before sending them to the shortener
-            await add_user_verification(user_id, owner_id)
-        
+        # --- Original interface for unverified users ---
+        text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
         shortened_link = await get_shortlink(final_delivery_link, owner_id)
         buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
 
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
     
-    await message.reply_text(
-        "**Your file is almost ready!**\n\n"
-        "1. Click the button above to complete the task.\n"
-        "2. You will be automatically redirected back, and I will send you the file.",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @Client.on_callback_query(filters.regex(r"^retry_"))
