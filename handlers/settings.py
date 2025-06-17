@@ -70,7 +70,8 @@ async def my_files_handler(client, query):
             if not files_on_page: text += "No more files found on this page."
             else:
                 for file in files_on_page:
-                    deep_link = f"https://t.me/{client.me.username}?start=get_{file['file_unique_id']}"
+                    # --- MODIFIED LINK FOR DIRECT ACCESS ---
+                    deep_link = f"https://t.me/{client.me.username}?start=ownerget_{file['file_unique_id']}"
                     text += f"**File:** `{file['file_name']}`\n**Link:** [Click Here to Get File]({deep_link})\n\n"
         buttons, nav_row = [], []
         if page > 1: nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"my_files_{page-1}"))
@@ -89,7 +90,8 @@ async def _format_and_send_search_results(client, query, user_id, search_query, 
     if not files_list: text += "No files found for your query."
     else:
         for file in files_list:
-            deep_link = f"https://t.me/{client.me.username}?start=get_{file['file_unique_id']}"
+            # --- MODIFIED LINK FOR DIRECT ACCESS ---
+            deep_link = f"https://t.me/{client.me.username}?start=ownerget_{file['file_unique_id']}"
             text += f"**File:** `{file['file_name']}`\n**Link:** [Click Here to Get File]({deep_link})\n\n"
     buttons, nav_row = [], []
     encoded_query = base64.urlsafe_b64encode(search_query.encode()).decode().strip("=")
