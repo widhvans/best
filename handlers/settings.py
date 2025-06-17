@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode # <-- Import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import MessageNotModified
 from database.db import (
@@ -17,7 +18,8 @@ ACTIVE_BACKUP_TASKS = set()
 async def safe_edit_message(query, *args, **kwargs):
     """A helper function to safely edit messages and handle common errors."""
     try:
-        await query.message.edit_text(*args, **kwargs)
+        # Always use Markdown parsing for consistency
+        await query.message.edit_text(*args, **kwargs, parse_mode=ParseMode.MARKDOWN)
     except MessageNotModified:
         try:
             await query.answer()
@@ -42,13 +44,14 @@ async def get_shortener_menu_parts(user_id):
 
     text = "**🔗 Shortener Settings**\n\nHere are your current settings:"
     
+    # --- FIXED: Show full API key ---
     if shortener_url and shortener_api:
         text += f"\n**Domain:** `{shortener_url}`"
-        masked_api = f"{'*' * (len(shortener_api) - 4)}{shortener_api[-4:]}"
-        text += f"\n**API Key:** `{masked_api}`"
+        text += f"\n**API Key:** `{shortener_api}`"
     else:
         text += "\n`No shortener domain or API is set.`"
     
+    # --- FIXED: Markdown formatting will now be handled by safe_edit_message ---
     status_text = 'ON 🟢' if is_enabled else 'OFF 🔴'
     mode_text = "Each Time" if shortener_mode == 'each_time' else "12 Hour Verify"
     
@@ -358,11 +361,12 @@ async def add_channel_prompt(client, query):
        (ch_type_short == 'post' and len(user_settings.get(ch_type_key, [])) >= 3):
         return await query.answer("You have reached the channel limit for this type.", show_alert=True)
     try:
-        question = await query.message.edit_text(f"Forward a message from your target **{ch_type_name} Channel**.", reply_markup=go_back_button(user_id))
+        # Note: Using reply_text here as edit_text might fail if the original message is old
+        question = await query.message.reply_text(f"Forward a message from your target **{ch_type_name} Channel**.", reply_markup=go_back_button(user_id), parse_mode=ParseMode.MARKDOWN)
         response = await client.listen(chat_id=user_id, filters=filters.forwarded, timeout=300)
         if response.forward_from_chat:
             await add_to_list(user_id, ch_type_key, response.forward_from_chat.id)
-            await response.reply_text(f"✅ Connected to **{response.forward_from_chat.title}**.", reply_markup=go_back_button(user_id))
+            await response.reply_text(f"✅ Connected to **{response.forward_from_chat.title}**.", reply_markup=go_back_button(user_id), parse_mode=ParseMode.MARKDOWN)
         else: await response.reply_text("Not a valid forwarded message.", reply_markup=go_back_button(user_id))
         if question: await question.delete()
         if response: await response.delete()
