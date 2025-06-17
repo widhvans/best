@@ -2,7 +2,7 @@ import asyncio
 import base64
 import logging
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode # <-- Import ParseMode
+from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import MessageNotModified
 from database.db import (
@@ -10,7 +10,7 @@ from database.db import (
     get_user_file_count, add_footer_button, remove_footer_button,
     get_all_user_files, get_paginated_files, search_user_files
 )
-from utils.helpers import go_back_button, get_main_menu, create_post, clean_filename, calculate_title_similarity
+from utils.helpers import go_back_button, create_post, clean_filename, calculate_title_similarity
 
 logger = logging.getLogger(__name__)
 ACTIVE_BACKUP_TASKS = set()
@@ -19,7 +19,9 @@ async def safe_edit_message(query, *args, **kwargs):
     """A helper function to safely edit messages and handle common errors."""
     try:
         # Always use Markdown parsing for consistency
-        await query.message.edit_text(*args, **kwargs, parse_mode=ParseMode.MARKDOWN)
+        if 'parse_mode' not in kwargs:
+            kwargs['parse_mode'] = ParseMode.MARKDOWN
+        await query.message.edit_text(*args, **kwargs)
     except MessageNotModified:
         try:
             await query.answer()
@@ -41,40 +43,29 @@ async def get_shortener_menu_parts(user_id):
     shortener_url = user.get('shortener_url')
     shortener_api = user.get('shortener_api')
     shortener_mode = user.get('shortener_mode', 'each_time')
-
     text = "**🔗 Shortener Settings**\n\nHere are your current settings:"
-    
-    # --- FIXED: Show full API key ---
     if shortener_url and shortener_api:
         text += f"\n**Domain:** `{shortener_url}`"
         text += f"\n**API Key:** `{shortener_api}`"
     else:
         text += "\n`No shortener domain or API is set.`"
-    
-    # --- FIXED: Markdown formatting will now be handled by safe_edit_message ---
     status_text = 'ON 🟢' if is_enabled else 'OFF 🔴'
     mode_text = "Each Time" if shortener_mode == 'each_time' else "12 Hour Verify"
-    
     text += f"\n\n**Status:** {status_text}"
     text += f"\n**Verification Mode:** {mode_text}"
-
     buttons = [
         [InlineKeyboardButton(f"Turn Shortener {'OFF' if is_enabled else 'ON'}", callback_data="toggle_shortener")]
     ]
-    
     if shortener_mode == 'each_time':
         buttons.append([InlineKeyboardButton("🔄 Switch to 12 Hour Verify", callback_data="toggle_smode")])
     else:
         buttons.append([InlineKeyboardButton("🔄 Switch to Each Time", callback_data="toggle_smode")])
-        
     buttons.append([InlineKeyboardButton("✏️ Set/Edit API & Domain", callback_data="set_shortener")])
     buttons.append([go_back_button(user_id).inline_keyboard[0][0]])
-    
     return text, InlineKeyboardMarkup(buttons)
 
 
 async def get_poster_menu_parts(user_id):
-    """Builds the text and keyboard for the poster settings menu."""
     user = await get_user(user_id)
     is_enabled = user.get('show_poster', True)
     text = f"**🖼️ Poster Settings**\n\nIMDb Poster is currently **{'ON' if is_enabled else 'OFF'}**."
@@ -84,7 +75,6 @@ async def get_poster_menu_parts(user_id):
     ])
 
 async def get_fsub_menu_parts(client, user_id):
-    """Builds the text and keyboard for the FSub settings menu."""
     user = await get_user(user_id)
     fsub_ch = user.get('fsub_channel')
     text = "**📢 FSub Settings**\n\n"
@@ -102,6 +92,35 @@ async def get_fsub_menu_parts(client, user_id):
     ])
 
 # --- Main Callback Handlers ---
+
+@Client.on_callback_query(filters.regex("^manage_channels_menu$"))
+async def manage_channels_submenu_handler(client, query):
+    text = "🗂️ **Manage Channels**\n\nSelect which type of channel you want to manage."
+    buttons = [
+        [InlineKeyboardButton("➕ Manage Auto Post", callback_data="manage_post_ch")],
+        [InlineKeyboardButton("🗃️ Manage Index DB", callback_data="manage_db_ch")],
+        [go_back_button(query.from_user.id).inline_keyboard[0][0]]
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+    await safe_edit_message(query, text=text, reply_markup=markup)
+
+@Client.on_callback_query(filters.regex("^filename_link_menu$"))
+async def filename_link_menu_handler(client, query):
+    user = await get_user(query.from_user.id)
+    filename_url = user.get("filename_url")
+    
+    text = "**✍️ Filename Link Settings**\n\nThis URL will be used as a hyperlink for the filename when a user receives a file."
+    if filename_url:
+        text += f"\n\n**Current Link:**\n`{filename_url}`"
+    else:
+        text += "\n\n`You have not set a filename link yet.`"
+    
+    buttons = [
+        [InlineKeyboardButton("✏️ Set/Change Link", callback_data="set_filename_link")],
+        [go_back_button(query.from_user.id).inline_keyboard[0][0]]
+    ]
+    await safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+
 
 @Client.on_callback_query(filters.regex(r"^(shortener|poster|fsub)_menu$"))
 async def settings_submenu_handler(client, query):
@@ -128,17 +147,14 @@ async def toggle_shortener_mode_handler(client, query):
     user_id = query.from_user.id
     user = await get_user(user_id)
     current_mode = user.get('shortener_mode', 'each_time')
-
     if current_mode == 'each_time':
         new_mode = '12_hour'
         mode_text = "12 Hour Verify"
     else:
         new_mode = 'each_time'
         mode_text = "Each Time"
-
     await update_user(user_id, 'shortener_mode', new_mode)
     await query.answer(f"Shortener mode set to: {mode_text}", show_alert=True)
-    
     text, markup = await get_shortener_menu_parts(user_id)
     await safe_edit_message(query, text=text, reply_markup=markup)
 
@@ -341,7 +357,7 @@ async def manage_channels_handler(client, query):
             except: buttons.append([InlineKeyboardButton(f"❌ Unavailable ({ch_id})", callback_data=f"rm_{ch_type}_{ch_id}")])
     else: text += "You haven't added any channels yet."
     buttons.append([InlineKeyboardButton("➕ Add New Channel", callback_data=f"add_{ch_type}_ch")])
-    buttons.append([InlineKeyboardButton("« Go Back", callback_data=f"go_back_{user_id}")])
+    buttons.append([InlineKeyboardButton("« Go Back", callback_data=f"manage_channels_menu")])
     await safe_edit_message(query, text=text, reply_markup=InlineKeyboardMarkup(buttons))
 
 @Client.on_callback_query(filters.regex(r"rm_(post|db)_-?\d+"))
@@ -361,17 +377,16 @@ async def add_channel_prompt(client, query):
        (ch_type_short == 'post' and len(user_settings.get(ch_type_key, [])) >= 3):
         return await query.answer("You have reached the channel limit for this type.", show_alert=True)
     try:
-        # Note: Using reply_text here as edit_text might fail if the original message is old
-        question = await query.message.reply_text(f"Forward a message from your target **{ch_type_name} Channel**.", reply_markup=go_back_button(user_id), parse_mode=ParseMode.MARKDOWN)
+        prompt = await query.message.edit_text(f"Forward a message from your target **{ch_type_name} Channel**.", reply_markup=go_back_button(user_id))
         response = await client.listen(chat_id=user_id, filters=filters.forwarded, timeout=300)
         if response.forward_from_chat:
             await add_to_list(user_id, ch_type_key, response.forward_from_chat.id)
-            await response.reply_text(f"✅ Connected to **{response.forward_from_chat.title}**.", reply_markup=go_back_button(user_id), parse_mode=ParseMode.MARKDOWN)
+            await response.reply_text(f"✅ Connected to **{response.forward_from_chat.title}**.", reply_markup=go_back_button(user_id))
         else: await response.reply_text("Not a valid forwarded message.", reply_markup=go_back_button(user_id))
-        if question: await question.delete()
+        await prompt.delete()
         if response: await response.delete()
     except asyncio.TimeoutError:
-        if 'question' in locals() and question: await safe_edit_message(question, text="Command timed out.")
+        if 'prompt' in locals() and prompt: await safe_edit_message(prompt, text="Command timed out.")
     except Exception as e:
         await query.message.reply_text(f"An error occurred: {e}", reply_markup=go_back_button(user_id))
 
@@ -396,7 +411,7 @@ async def set_other_links_handler(client, query):
     prompts = {"fsub": ("📢 **Set FSub**\n\nForward a message from your FSub channel.", "fsub_channel"), "download": ("❓ **Set 'How to Download'**\n\nSend your tutorial URL.", "how_to_download_link")}
     prompt_text, key = prompts[action]
     try:
-        question = await query.message.edit_text(prompt_text, reply_markup=go_back_button(user_id))
+        prompt = await query.message.edit_text(prompt_text, reply_markup=go_back_button(user_id))
         response = await client.listen(chat_id=user_id, timeout=300, filters=filters.forwarded if action == "fsub" else filters.text)
         if action == "fsub":
             if not response.forward_from_chat: return await response.reply("Not a valid forwarded message.", reply_markup=go_back_button(user_id))
@@ -406,11 +421,11 @@ async def set_other_links_handler(client, query):
             value = response.text
         await update_user(user_id, key, value)
         await response.reply("✅ Settings updated!", reply_markup=go_back_button(user_id))
-        await question.delete()
+        await prompt.delete()
     except asyncio.TimeoutError:
-        if 'question' in locals() and question: await safe_edit_message(question, text="❗️ **Timeout:** Cancelled.", reply_markup=go_back_button(user_id))
+        if 'prompt' in locals() and prompt: await safe_edit_message(prompt, text="❗️ **Timeout:** Cancelled.", reply_markup=go_back_button(user_id))
     except Exception as e:
-        if 'question' in locals() and question: await safe_edit_message(question, text=f"An error occurred: {e}", reply_markup=go_back_button(user_id))
+        if 'prompt' in locals() and prompt: await safe_edit_message(prompt, text=f"An error occurred: {e}", reply_markup=go_back_button(user_id))
 
 @Client.on_callback_query(filters.regex("^set_shortener$"))
 async def set_shortener_handler(client, query):
