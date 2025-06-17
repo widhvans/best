@@ -2,14 +2,53 @@ import re
 import base64
 import logging
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid
 from config import Config
-from database.db import get_user
+from database.db import get_user, remove_from_list  # Modified import
 from features.poster import get_poster
 from thefuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
 FILES_PER_POST = 20
+
+# --- NEW FUNCTION ---
+async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
+    """
+    Checks if a channel is accessible. If not, notifies the user and removes it from DB.
+    Returns True if channel is valid, False otherwise.
+    """
+    try:
+        # A lightweight check to see if the bot is in the channel
+        await client.get_chat_member(channel_id, client.me.id)
+        return True
+    except (UserNotParticipant, ChatAdminRequired, ChannelInvalid) as e:
+        channel_name = f"ID `{channel_id}`"
+        try:
+            # Try to get chat title for a friendlier message, might fail if channel is deleted
+            chat = await client.get_chat(channel_id)
+            channel_name = f"**{chat.title}** (`{channel_id}`)"
+        except Exception:
+            pass
+            
+        error_text = (
+            f"⚠️ **Channel Inaccessible**\n\n"
+            f"Your {channel_type} Channel {channel_name} is no longer accessible. "
+            f"The bot may have been kicked, or the channel was deleted.\n\n"
+            f"This channel has been automatically removed from your settings to prevent further errors."
+        )
+        try:
+            # Notify the user about the issue
+            await client.send_message(user_id, error_text)
+            # Remove the invalid channel from the user's settings
+            await remove_from_list(user_id, f"{channel_type.lower()}_channels", channel_id)
+        except Exception as notify_error:
+            logger.error(f"Failed to notify or remove channel for user {user_id}. Error: {notify_error}")
+        return False
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
+        return False # Treat unexpected errors as failures to be safe
+
 
 def calculate_title_similarity(title1: str, title2: str) -> float:
     """Calculates the similarity between two titles using fuzzy matching."""
