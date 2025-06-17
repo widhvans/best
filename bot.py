@@ -6,7 +6,7 @@ from pyromod import Client
 from aiohttp import web
 from config import Config
 from database.db import get_user, save_file_data, get_owner_db_channel
-from utils.helpers import create_post, clean_filename, calculate_title_similarity
+from utils.helpers import create_post, clean_filename, calculate_title_similarity, notify_and_remove_invalid_channel
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
@@ -49,7 +49,19 @@ class Bot(Client):
             post_channels = user.get('post_channels', [])
             if not user or not post_channels: return
 
+            # --- MODIFIED LOGIC: Check channel validity before posting ---
+            valid_post_channels = []
             for channel_id in post_channels:
+                if await notify_and_remove_invalid_channel(self, user_id, channel_id, "post"):
+                    valid_post_channels.append(channel_id)
+            
+            if not valid_post_channels:
+                logger.warning(f"User {user_id} has no valid post channels for batch '{batch_title}'.")
+                await self.send_message(user_id, f"⚠️ Could not post the batch for **{batch_title}** because you have no valid Post Channels configured. Please check your bot settings.")
+                return
+            # --- END OF MODIFICATION ---
+
+            for channel_id in valid_post_channels:
                 if not self.notification_flags.get(channel_id):
                     self.notification_flags[channel_id] = True
                     logger.info(f"Sending 'coming soon' notification to {channel_id}.")
@@ -60,7 +72,7 @@ class Bot(Client):
 
             posts_to_send = await create_post(self, user_id, messages)
             
-            for channel_id in post_channels:
+            for channel_id in valid_post_channels:
                 for post in posts_to_send:
                     poster, caption, footer = post
                     if poster: await self.send_with_protection(self.send_photo, channel_id, poster, caption=caption, reply_markup=footer)
