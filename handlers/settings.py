@@ -37,21 +37,28 @@ async def get_shortener_menu_parts(user_id):
     user = await get_user(user_id)
     is_enabled = user.get('shortener_enabled', True)
     shortener_url = user.get('shortener_url')
+    shortener_api = user.get('shortener_api')
     shortener_mode = user.get('shortener_mode', 'each_time')
 
-    text = f"**🔗 Shortener Settings**\n\nYour shortener is currently **{'ON' if is_enabled else 'OFF'}**."
-    if shortener_url:
+    text = "**🔗 Shortener Settings**\n\nHere are your current settings:"
+    
+    if shortener_url and shortener_api:
         text += f"\n**Domain:** `{shortener_url}`"
+        masked_api = f"{'*' * (len(shortener_api) - 4)}{shortener_api[-4:]}"
+        text += f"\n**API Key:** `{masked_api}`"
+    else:
+        text += "\n`No shortener domain or API is set.`"
     
+    status_text = 'ON 🟢' if is_enabled else 'OFF 🔴'
     mode_text = "Each Time" if shortener_mode == 'each_time' else "12 Hour Verify"
-    text += f"\n**Verification Mode:** `{mode_text}`\n\nChoose an option to configure."
     
+    text += f"\n\n**Status:** {status_text}"
+    text += f"\n**Verification Mode:** {mode_text}"
+
     buttons = [
-        # --- FIXED: Added emojis to the ON/OFF button ---
-        [InlineKeyboardButton(f"Turn Shortener {'OFF 🔴' if is_enabled else 'ON 🟢'}", callback_data="toggle_shortener")]
+        [InlineKeyboardButton(f"Turn Shortener {'OFF' if is_enabled else 'ON'}", callback_data="toggle_shortener")]
     ]
     
-    # --- FIXED: Simplified callback data for the mode toggle button ---
     if shortener_mode == 'each_time':
         buttons.append([InlineKeyboardButton("🔄 Switch to 12 Hour Verify", callback_data="toggle_smode")])
     else:
@@ -61,6 +68,7 @@ async def get_shortener_menu_parts(user_id):
     buttons.append([go_back_button(user_id).inline_keyboard[0][0]])
     
     return text, InlineKeyboardMarkup(buttons)
+
 
 async def get_poster_menu_parts(user_id):
     """Builds the text and keyboard for the poster settings menu."""
@@ -112,14 +120,12 @@ async def toggle_shortener_handler(client, query):
     text, markup = await get_shortener_menu_parts(user_id)
     await safe_edit_message(query, text=text, reply_markup=markup)
 
-# --- FIXED: Rewritten handler for shortener mode toggle ---
 @Client.on_callback_query(filters.regex(r"toggle_smode$"))
 async def toggle_shortener_mode_handler(client, query):
     user_id = query.from_user.id
     user = await get_user(user_id)
     current_mode = user.get('shortener_mode', 'each_time')
 
-    # Flip the mode to the other option
     if current_mode == 'each_time':
         new_mode = '12_hour'
         mode_text = "12 Hour Verify"
@@ -130,7 +136,6 @@ async def toggle_shortener_mode_handler(client, query):
     await update_user(user_id, 'shortener_mode', new_mode)
     await query.answer(f"Shortener mode set to: {mode_text}", show_alert=True)
     
-    # Refresh the menu
     text, markup = await get_shortener_menu_parts(user_id)
     await safe_edit_message(query, text=text, reply_markup=markup)
 
