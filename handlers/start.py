@@ -56,15 +56,12 @@ async def start_command(client, message):
             if payload.startswith("finalget_"):
                 _, file_unique_id = payload.split("_", 1)
                 
-                # --- NEW LOGIC: Attempt to claim verification from the file ---
                 file_data = await get_file_by_unique_id(file_unique_id)
                 if file_data:
                     owner_id = file_data['owner_id']
                     owner_settings = await get_user(owner_id)
                     
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
-                        # This function now handles the single-use logic.
-                        # It will only return True for the very first user who completes this link.
                         claim_successful = await claim_verification_for_file(file_unique_id, user_id, owner_id)
                         
                         if claim_successful:
@@ -160,11 +157,23 @@ async def retry_handler(client, query):
     await query.message.delete()
     await handle_public_file_request(client, query.message, query.from_user.id, query.data.split("_", 1)[1])
 
+# --- UPDATED: go_back_callback now uses the new get_main_menu return values ---
 @Client.on_callback_query(filters.regex(r"go_back_"))
 async def go_back_callback(client, query):
     user_id = int(query.data.split("_")[-1])
-    if query.from_user.id != user_id: return await query.answer("This is not for you!", show_alert=True)
+    if query.from_user.id != user_id: 
+        return await query.answer("This is not for you!", show_alert=True)
     try:
-        await query.message.edit_text("⚙️ Here are the main settings:", reply_markup=await get_main_menu(user_id))
+        # Get both the text and the keyboard from the helper
+        menu_text, menu_markup = await get_main_menu(user_id)
+        # Edit the message with the new dynamic text and keyboard
+        await query.message.edit_text(
+            text=menu_text, 
+            reply_markup=menu_markup, 
+            disable_web_page_preview=True # Prevent link previews in the menu
+        )
     except MessageNotModified:
         await query.answer()
+    except Exception as e:
+        logger.error(f"Error in go_back_callback: {e}")
+        await query.answer("An error occurred while loading the menu.", show_alert=True)
