@@ -1,7 +1,7 @@
 import traceback
 import logging
 from pyrogram import Client, filters, enums
-from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid
+from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid, PeerIdInvalid
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import Config
 from database.db import (
@@ -93,7 +93,7 @@ async def start_command(client, message):
 
 
 async def handle_public_file_request(client, message, user_id, payload):
-    """The final, robust handler for public links."""
+    """The final, robust handler for public links with the corrected FSub logic."""
     file_unique_id = payload.split("_", 1)[1]
     file_data = await get_file_by_unique_id(file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
@@ -101,23 +101,43 @@ async def handle_public_file_request(client, message, user_id, payload):
     owner_id = file_data['owner_id']
     owner_settings = await get_user(owner_id)
     
+    # --- NEW, ROBUST FSUB LOGIC ---
     fsub_channel = owner_settings.get('fsub_channel')
     if fsub_channel:
         try:
-            await client.get_chat_member(chat_id=fsub_channel, user_id=user_id)
-        except UserNotParticipant:
-            try: invite_link = await client.export_chat_invite_link(fsub_channel)
-            except: invite_link = None
-            buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
-            return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
-        except (ChatAdminRequired, ChannelInvalid) as e:
-            logger.error(f"FSub channel error for owner {owner_id}: {e}")
+            # First, check if the BOT has access to the channel.
+            # Using get_chat_member on "me" is a reliable way to check for access.
+            await client.get_chat_member(chat_id=fsub_channel, user_id="me")
+            
+            # If the above line didn't fail, the bot has access. Now, check the user.
+            try:
+                await client.get_chat_member(chat_id=fsub_channel, user_id=user_id)
+            except UserNotParticipant:
+                # This block now ONLY runs if the USER is not in the channel.
+                try: 
+                    invite_link = await client.export_chat_invite_link(fsub_channel)
+                except Exception: 
+                    invite_link = None
+                buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
+                return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
+
+        except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid) as e:
+            # This block now catches errors related to the BOT's access to the channel.
+            logger.error(f"FSub channel error for owner {owner_id} (Channel: {fsub_channel}): {e}")
+            
+            # Notify the bot owner that their FSub channel is broken.
             await client.send_message(
                 chat_id=owner_id,
-                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is inaccessible. The bot might have been kicked or lost admin permissions. It has been disabled. Please set a new one in settings."
+                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is no longer accessible. The bot might have been kicked, the channel was deleted, or it lost admin permissions.\n\nIt has been automatically disabled. Please go to settings to set a new one."
             )
+            
+            # Disable the broken setting in the database.
             await update_user(owner_id, "fsub_channel", None)
+            
+            # Allow the current end-user to proceed for a better experience.
             pass
+    # --- END OF FSUB LOGIC ---
+
 
     shortener_enabled = owner_settings.get('shortener_enabled', True)
     shortener_mode = owner_settings.get('shortener_mode', 'each_time')
@@ -158,21 +178,18 @@ async def retry_handler(client, query):
     await query.message.delete()
     await handle_public_file_request(client, query.message, query.from_user.id, query.data.split("_", 1)[1])
 
-# --- UPDATED: go_back_callback now uses the new get_main_menu return values ---
 @Client.on_callback_query(filters.regex(r"go_back_"))
 async def go_back_callback(client, query):
     user_id = int(query.data.split("_")[-1])
     if query.from_user.id != user_id: 
         return await query.answer("This is not for you!", show_alert=True)
     try:
-        # Get both the text and the keyboard from the helper
         menu_text, menu_markup = await get_main_menu(user_id)
-        # Edit the message with the new dynamic text and keyboard
         await query.message.edit_text(
             text=menu_text, 
             reply_markup=menu_markup, 
             parse_mode=enums.ParseMode.MARKDOWN,
-            disable_web_page_preview=True # Prevent link previews in the menu
+            disable_web_page_preview=True
         )
     except MessageNotModified:
         await query.answer()
