@@ -61,19 +61,12 @@ def clean_filename(name: str):
 
 async def create_post(client, user_id, messages):
     """
-    Creates a professionally designed post with hyperlink on filename if set.
+    Creates a professionally designed post with wrapped title and footer line.
     """
     user = await get_user(user_id)
     if not user: return []
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
     if not first_media_obj: return []
-
-    # ================================================================= #
-    # VVVVVV YAHAN PAR FILENAME LINK KA LOGIC ADD KIYA GAYA HAI VVVVVV #
-    # ================================================================= #
-    
-    # User ki 'filename_url' setting ko get karein
-    filename_url = user.get("filename_url")
 
     primary_base_title, _, year = clean_filename(first_media_obj.file_name)
     
@@ -97,6 +90,9 @@ async def create_post(client, user_id, messages):
     footer_buttons = user.get('footer_buttons', [])
     footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
     
+    # ================================================================= #
+    # VVVVVV YAHAN PAR NAYE DESIGN ELEMENTS ADD KIYE GAYE HAIN VVVVVV #
+    # ================================================================= #
     header_line = "▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱"
     footer_line = "•·•·•·•·•·•·•·•·•·••·•·•·•·•·•·•·•"
 
@@ -128,12 +124,7 @@ async def create_post(client, user_id, messages):
 
             link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
             
-            # Agar filename_url set hai, to filename ko hyperlink banayein
-            if filename_url:
-                file_entry = f"📁 [`{label_no_mentions or media.file_name}`]({filename_url})"
-            else:
-                # Agar nahi, to plain text rakhein
-                file_entry = f"📁 `{label_no_mentions or media.file_name}`"
+            file_entry = f"📁 `{label_no_mentions or media.file_name}`"
             
             if filtered_text:
                 file_entry += f"\n   `{filtered_text}`"
@@ -142,8 +133,9 @@ async def create_post(client, user_id, messages):
             
             links.append(file_entry)
 
+        # Final caption ko naye design ke saath banayein
         final_caption = f"{header_line}\n{header}\n{header_line}\n\n" + "\n\n".join(links)
-        final_caption += f"\n\n{footer_line}"
+        final_caption += f"\n\n{footer_line}" # Footer line add karein
 
         posts.append((post_poster, final_caption, footer_keyboard))
         
@@ -170,6 +162,7 @@ async def get_main_menu(user_id):
         [InlineKeyboardButton(shortener_text, callback_data="shortener_menu"), InlineKeyboardButton("🔄 Backup Links", callback_data="backup_links")],
         [InlineKeyboardButton("✍️ Filename Link", callback_data="filename_link_menu"), InlineKeyboardButton("👣 Footer Buttons", callback_data="manage_footer")],
         [InlineKeyboardButton("🖼️ IMDb Poster", callback_data="poster_menu"), InlineKeyboardButton("📂 My Files", callback_data="my_files_1")],
+        # 'How to Download' button ke liye callback_data badla gaya hai
         [InlineKeyboardButton(fsub_text, callback_data="fsub_menu"), InlineKeyboardButton("❓ How to Download", callback_data="how_to_download_menu")]
     ]
     
@@ -183,7 +176,6 @@ async def get_main_menu(user_id):
         
     keyboard = InlineKeyboardMarkup(buttons)
     return menu_text, keyboard
-
 
 # ================================================================= #
 # Baaki ka code waisa hi hai, usmein koi badlav nahi hai
