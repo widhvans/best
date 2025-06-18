@@ -9,7 +9,6 @@ from config import Config
 from database.db import (
     get_user, save_file_data, get_owner_db_channel, get_stream_channel, get_file_by_unique_id
 )
-# We need create_post back for public channel posts
 from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, get_title_key
 
 # Setup logging
@@ -52,7 +51,6 @@ class Bot(Client):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
-    # --- REVERTED: _finalize_batch now uses create_post again for text-based posts ---
     async def _finalize_batch(self, user_id, batch_key):
         notification_messages = []
         try:
@@ -77,7 +75,6 @@ class Bot(Client):
                 logger.warning(f"User {user_id} has no valid post channels for batch '{batch_display_title}'.")
                 return
 
-            # Use create_post to generate caption-based posts for public channels
             posts_to_send = await create_post(self, user_id, messages)
             
             for channel_id in valid_post_channels:
@@ -92,7 +89,6 @@ class Bot(Client):
                 await self.send_with_protection(sent_msg.delete)
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
-    # --- END REVERTED ---
 
     async def file_processor_worker(self):
         logger.info("File Processor Worker started.")
@@ -103,16 +99,21 @@ class Bot(Client):
                 if not self.owner_db_channel_id: self.owner_db_channel_id = await get_owner_db_channel()
                 if not self.owner_db_channel_id:
                     logger.error("Owner DB Channel is mandatory and not set. File processing skipped.")
+                    self.file_queue.task_done() # <-- Yahan add kiya
                     continue
 
                 if not self.stream_channel_id: self.stream_channel_id = await get_stream_channel()
                 
                 copied_message = await self.send_with_protection(message.copy, self.owner_db_channel_id)
-                if not copied_message: continue
+                if not copied_message: 
+                    self.file_queue.task_done() # <-- Yahan add kiya
+                    continue
 
                 if self.stream_channel_id and self.stream_channel_id != self.owner_db_channel_id:
                     stream_message = await self.send_with_protection(message.copy, self.stream_channel_id)
-                    if not stream_message: continue
+                    if not stream_message: 
+                        self.file_queue.task_done() # <-- Yahan add kiya
+                        continue
                 else:
                     stream_message = copied_message
 
@@ -121,7 +122,9 @@ class Bot(Client):
                 filename = getattr(copied_message, copied_message.media.value).file_name
                 title_key = get_title_key(filename)
                 if not title_key:
-                    logger.warning(f"Could not generate a title key for filename: {filename}"); continue
+                    logger.warning(f"Could not generate a title key for filename: {filename}")
+                    self.file_queue.task_done() # <-- Yahan add kiya
+                    continue
 
                 self.open_batches.setdefault(user_id, {})
                 loop = asyncio.get_event_loop()
@@ -138,11 +141,14 @@ class Bot(Client):
                         'timer': loop.call_later(7, lambda key=title_key: asyncio.create_task(self._finalize_batch(user_id, key)))
                     }
                     logger.info(f"Created new batch with key '{title_key}'")
+                
+                # Yeh line 'finally' block se yahan move ki gayi hai
+                self.file_queue.task_done()
+
             except Exception as e:
                 logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
-            finally:
-                self.file_queue.task_done()
-    
+                # Agar exception aati hai to task_done call nahi hona chahiye, isliye yahan kuch nahi hai
+
     async def send_with_protection(self, coro, *args, **kwargs):
         while True:
             try:
