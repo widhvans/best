@@ -1,4 +1,4 @@
-# bot.py (Full Updated Code)
+# bot.py (Full Updated Code with Stream Management)
 
 import logging
 import asyncio
@@ -38,11 +38,11 @@ class Bot(Client):
             api_hash=Config.API_HASH,
             bot_token=Config.BOT_TOKEN,
             plugins=dict(root="handlers"),
-            workers=100
+            workers=200 # Increased for better concurrency
         )
         self.me = None
         self.web_app = None
-        self.web_runner = None # web_server se wapas web_runner par
+        self.web_runner = None
         
         self.owner_db_channel_id = None
         self.stream_channel_id = None
@@ -51,13 +51,28 @@ class Bot(Client):
         self.notification_flags = {}
         self.notification_timers = {}
         
-        self.media_cache = {}
-        self.cache_lock = asyncio.Lock()
-        
-        self.vps_ip = Config.VPS_IP
-        self.vps_port = Config.VPS_PORT
+        # ================================================================= #
+        # VVVVVV NAYA STREAMING WAREHOUSE SYSTEM (Producer-Consumer) VVVVVV #
+        # ================================================================= #
+        self.stream_locks = {}      # Har file ke liye ek alag lock
+        self.stream_producers = {}  # Har file ke liye ek dedicated downloader task
 
-    # Baaki ke functions (_reset_notification_flag, etc.) waise hi rahenge...
+    async def start_web_server(self):
+        from server.stream_routes import routes as stream_routes
+        self.web_app = web.Application()
+        self.web_app['bot'] = self
+        self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
+        self.web_app.add_routes(stream_routes)
+        
+        self.web_runner = web.AppRunner(self.web_app)
+        await self.web_runner.setup()
+        
+        site = web.TCPSite(self.web_runner, self.vps_ip, self.vps_port)
+        
+        await site.start()
+        logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
+
+    # Baaki ke functions (_reset_notification_flag, etc.) mein koi badlav nahi hai
     def _reset_notification_flag(self, channel_id):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
@@ -167,22 +182,6 @@ class Bot(Client):
                 logger.warning(f"FloodWait of {e.value}s detected. Sleeping..."); await asyncio.sleep(e.value + 2)
             except Exception as e:
                 logger.error(f"SEND_PROTECTION: An error occurred: {e}"); raise
-
-    async def start_web_server(self):
-        from server.stream_routes import routes as stream_routes
-        self.web_app = web.Application()
-        self.web_app['bot'] = self
-        self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
-        self.web_app.add_routes(stream_routes)
-        
-        # DeprecationWarning fix: aiohttp ke modern AppRunner API ka istemal
-        self.web_runner = web.AppRunner(self.web_app)
-        await self.web_runner.setup()
-        
-        site = web.TCPSite(self.web_runner, self.vps_ip, self.vps_port)
-        
-        await site.start()
-        logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
 
     async def start(self):
         await super().start()
