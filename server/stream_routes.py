@@ -1,4 +1,4 @@
-# server/stream_routes.py (The Ultimate Speed & Seeking Fix)
+# server/stream_routes.py (Full Replacement with Caching)
 
 import logging
 import asyncio
@@ -40,27 +40,50 @@ async def watch_handler(request: web.Request):
 
 async def stream_or_download(request: web.Request, disposition: str):
     """
-    Handles streaming and downloading with full support for HTTP Range Requests,
-    enabling seeking and faster buffering in external players.
+    Handles streaming with metadata caching to boost performance for external players.
     """
+    bot = request.app['bot']
+    message_id_str = request.match_info.get("message_id")
+
     try:
-        message_id = int(request.match_info.get("message_id"))
-        bot = request.app['bot']
+        message_id = int(message_id_str)
 
-        chat_id = bot.stream_channel_id or bot.owner_db_channel_id
-        if not chat_id:
-            raise ValueError("Streaming channels not configured.")
+        # ================================================================= #
+        # VVVVVV YAHAN PAR NAYA SMART CACHING LOGIC ADD KIYA GAYA HAI VVVVVV #
+        # ================================================================= #
+        
+        # Pehle check karein ki file ki details memory mein hain ya nahi
+        async with bot.cache_lock:
+            media_meta = bot.media_cache.get(message_id)
+            if not media_meta:
+                logger.info(f"Cache MISS for message_id: {message_id}. Fetching from Telegram.")
+                chat_id = bot.stream_channel_id or bot.owner_db_channel_id
+                if not chat_id:
+                    raise ValueError("Streaming channels not configured.")
+                
+                message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
 
-        message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
+                if not message or not message.media:
+                    return web.Response(status=404, text="File not found or has no media.")
+                
+                media = getattr(message, message.media.value)
+                # Details ko memory mein save karein
+                media_meta = {
+                    "message_object": message,
+                    "file_name": getattr(media, "file_name", "unknown.dat"),
+                    "file_size": int(getattr(media, "file_size", 0)),
+                    "mime_type": getattr(media, "mime_type", "application/octet-stream")
+                }
+                bot.media_cache[message_id] = media_meta
+            else:
+                logger.info(f"Cache HIT for message_id: {message_id}. Using memory cache.")
 
-        if not message or not message.media:
-            return web.Response(status=404, text="File not found or has no media.")
+        message = media_meta["message_object"]
+        file_name = media_meta["file_name"]
+        file_size = media_meta["file_size"]
+        mime_type = media_meta["mime_type"]
 
-        media = getattr(message, message.media.value)
-        file_name = getattr(media, "file_name", "unknown.dat")
-        file_size = int(getattr(media, "file_size", 0))
-
-        # HTTP Range Requests ko handle karein
+        # Range request logic waisa hi rahega
         range_header = request.headers.get("Range")
         if range_header:
             from_bytes, until_bytes = 0, file_size - 1
@@ -72,34 +95,31 @@ async def stream_or_download(request: web.Request, disposition: str):
             except (ValueError, IndexError):
                 return web.Response(status=400, text="Invalid Range header.")
 
-            if (from_bytes > file_size) or (until_bytes >= file_size):
-                return web.Response(status=416)  # Range Not Satisfiable
+            if (from_bytes >= file_size) or (until_bytes >= file_size):
+                return web.Response(status=416)
 
             chunk_size = until_bytes - from_bytes + 1
             offset = from_bytes
-            status = 206  # Partial Content
-
+            status = 206
             headers = {
-                "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                "Content-Type": mime_type,
                 "Content-Disposition": f'{disposition}; filename="{file_name}"',
                 "Content-Length": str(chunk_size),
                 "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
                 "Accept-Ranges": "bytes"
             }
         else:
-            # Agar Range request nahi hai, to poori file bhejein
             headers = {
-                "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                "Content-Type": mime_type,
                 "Content-Disposition": f'{disposition}; filename="{file_name}"',
                 "Content-Length": str(file_size)
             }
             offset = 0
-            status = 200  # OK
+            status = 200
         
         response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
         
-        # Pyrogram ke stable stream_media ko calculated offset ke saath istemal karein
         streamer = bot.stream_media(message, offset=offset)
         
         async for chunk in streamer:
@@ -115,17 +135,15 @@ async def stream_or_download(request: web.Request, disposition: str):
         logger.error(f"File ID or configuration error for stream request: {e}")
         return web.Response(status=404, text="File not found or link expired.")
     except Exception:
-        logger.critical("FATAL: Unexpected error in stream/download handler", exc_info=True)
+        logger.critical(f"FATAL: Unexpected error in stream/download handler for message_id={message_id_str}", exc_info=True)
         return web.Response(status=500, text="Internal Server Error")
 
 
 @routes.get("/stream/{message_id:\\d+}", allow_head=True)
 async def stream_handler(request: web.Request):
-    """Handler for inline video playback with seeking support."""
     return await stream_or_download(request, "inline")
 
 
 @routes.get("/download/{message_id:\\d+}", allow_head=True)
 async def download_handler(request: web.Request):
-    """Handler for direct file downloads with seeking/resume support."""
     return await stream_or_download(request, "attachment")
