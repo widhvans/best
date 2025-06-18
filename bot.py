@@ -6,7 +6,7 @@ from pyromod import Client
 from aiohttp import web
 from config import Config
 from database.db import get_user, save_file_data, get_owner_db_channel
-from utils.helpers import create_post, clean_filename, calculate_title_similarity, notify_and_remove_invalid_channel
+from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, get_title_key
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
@@ -37,27 +37,31 @@ class Bot(Client):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
-    async def _finalize_batch(self, user_id, batch_id):
+    # --- UPDATED: Batching logic now uses a title key instead of a display title ---
+    async def _finalize_batch(self, user_id, batch_key):
         notification_messages = []
         try:
-            if user_id not in self.open_batches or batch_id not in self.open_batches[user_id]: return
-            batch_data = self.open_batches[user_id].pop(batch_id)
-            messages, batch_title = batch_data['messages'], batch_data['title']
+            if user_id not in self.open_batches or batch_key not in self.open_batches[user_id]: return
+            batch_data = self.open_batches[user_id].pop(batch_key)
+            messages = batch_data['messages']
             if not messages: return
             
+            # Reconstruct a display title from the first message for notifications
+            first_filename = getattr(messages[0], messages[0].media.value).file_name
+            batch_display_title, _ = clean_filename(first_filename)
+
             user = await get_user(user_id)
             post_channels = user.get('post_channels', [])
             if not user or not post_channels: return
 
-            # --- Check channel validity before posting ---
             valid_post_channels = []
             for channel_id in post_channels:
                 if await notify_and_remove_invalid_channel(self, user_id, channel_id, "Post"):
                     valid_post_channels.append(channel_id)
             
             if not valid_post_channels:
-                logger.warning(f"User {user_id} has no valid post channels for batch '{batch_title}'.")
-                await self.send_message(user_id, f"⚠️ Could not post the batch for **{batch_title}** because you have no valid Post Channels configured. Please check your bot settings.")
+                logger.warning(f"User {user_id} has no valid post channels for batch '{batch_display_title}'.")
+                await self.send_message(user_id, f"⚠️ Could not post the batch for **{batch_display_title}** because you have no valid Post Channels configured. Please check your bot settings.")
                 return
 
             for channel_id in valid_post_channels:
@@ -77,13 +81,14 @@ class Bot(Client):
                     if poster: await self.send_with_protection(self.send_photo, channel_id, poster, caption=caption, reply_markup=footer)
                     else: await self.send_with_protection(self.send_message, channel_id, caption, reply_markup=footer, disable_web_page_preview=True)
                     await asyncio.sleep(2)
-        except Exception as e: logger.exception(f"Error finalizing batch {batch_id}: {e}")
+        except Exception as e: logger.exception(f"Error finalizing batch {batch_key}: {e}")
         finally:
             for sent_msg in notification_messages:
                 await self.send_with_protection(sent_msg.delete)
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
 
+    # --- REWRITTEN: Worker now uses the title key system ---
     async def file_processor_worker(self):
         logger.info("Fuzzy Matching Worker started.")
         while True:
@@ -98,33 +103,35 @@ class Bot(Client):
 
                 await save_file_data(user_id, message, copied_message)
                 
-                new_title, _ = clean_filename(getattr(copied_message, copied_message.media.value).file_name)
-                if not new_title: continue
-
-                best_match_id, highest_similarity = None, 0.85
-                self.open_batches.setdefault(user_id, {})
-
-                for batch_id, data in self.open_batches[user_id].items():
-                    similarity = calculate_title_similarity(new_title, data['title'])
-                    if similarity > highest_similarity:
-                        highest_similarity, best_match_id = similarity, batch_id
+                filename = getattr(copied_message, copied_message.media.value).file_name
+                title_key = get_title_key(filename)
                 
+                if not title_key:
+                    logger.warning(f"Could not generate a title key for filename: {filename}")
+                    continue
+
+                self.open_batches.setdefault(user_id, {})
                 loop = asyncio.get_event_loop()
-                if best_match_id:
-                    batch = self.open_batches[user_id][best_match_id]
+
+                if title_key in self.open_batches[user_id]:
+                    # Add to existing batch
+                    batch = self.open_batches[user_id][title_key]
                     batch['messages'].append(copied_message)
-                    if batch.get('timer'): batch['timer'].cancel()
-                    batch['timer'] = loop.call_later(7, lambda: asyncio.create_task(self._finalize_batch(user_id, best_match_id)))
-                    logger.info(f"Added to batch '{batch['title']}' (Similarity: {highest_similarity:.2f})")
+                    if batch.get('timer'):
+                        batch['timer'].cancel()
+                    batch['timer'] = loop.call_later(7, lambda key=title_key: asyncio.create_task(self._finalize_batch(user_id, key)))
+                    logger.info(f"Added to batch with key '{title_key}'")
                 else:
-                    new_batch_id = copied_message.id
-                    self.open_batches[user_id][new_batch_id] = {
-                        'title': new_title, 'messages': [copied_message],
-                        'timer': loop.call_later(7, lambda: asyncio.create_task(self._finalize_batch(user_id, new_batch_id)))
+                    # Create a new batch
+                    self.open_batches[user_id][title_key] = {
+                        'messages': [copied_message],
+                        'timer': loop.call_later(7, lambda key=title_key: asyncio.create_task(self._finalize_batch(user_id, key)))
                     }
-                    logger.info(f"Created new batch for '{new_title}'")
-            except Exception as e: logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
-            finally: self.file_queue.task_done()
+                    logger.info(f"Created new batch with key '{title_key}'")
+            except Exception as e: 
+                logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
+            finally: 
+                self.file_queue.task_done()
     
     async def send_with_protection(self, coro, *args, **kwargs):
         while True:
