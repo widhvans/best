@@ -60,7 +60,8 @@
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px; margin: 20px 0;
         }
-        button {
+        /* --- FIX: Style both buttons and a.button links the same way --- */
+        button, a.button {
             padding: 15px;
             background: linear-gradient(45deg, #00d4ff, #ff2e63);
             color: #ffffff; font-family: 'Poppins', sans-serif;
@@ -68,8 +69,10 @@
             border: none; border-radius: 10px; cursor: pointer;
             transition: transform 0.3s ease, box-shadow 0.3s ease;
             display: flex; align-items: center; justify-content: center; gap: 10px;
+            text-decoration: none; /* Remove underline from link */
+            box-sizing: border-box;
         }
-        button:hover {
+        button:hover, a.button:hover {
             transform: translateY(-3px);
             box-shadow: 0 5px 15px rgba(0, 212, 255, 0.5);
         }
@@ -93,7 +96,7 @@
         <div class="buttons-grid">
             <button onclick="openExternalPlayer('vlc')"><i class="fas fa-play"></i> Watch in VLC</button>
             <button onclick="openExternalPlayer('mx')"><i class="fas fa-play"></i> Watch in MX Player</button>
-            <button onclick="downloadVideo()"><i class="fas fa-download"></i> Direct Download</button>
+            <a href="{{ download_url }}" class="button" download><i class="fas fa-download"></i> Direct Download</a>
         </div>
     </div>
     <footer>
@@ -101,15 +104,9 @@
     </footer>
     <script>
         const streamUrl = "{{ stream_url }}";
-        // --- FIX: Use the dedicated download URL ---
-        const downloadUrl = "{{ download_url }}"; 
+        // The downloadUrl is now handled by the <a> tag, so JS is not needed for it.
         
-        function downloadVideo() {
-            window.location.href = downloadUrl; // Use the correct URL
-        }
-
         function openExternalPlayer(player) {
-            // External players should use the direct stream link
             const httpUrl = streamUrl.replace(/^https?:\/\//, 'http://');
             let intentUrl;
             switch(player) {
