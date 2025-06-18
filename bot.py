@@ -1,5 +1,7 @@
+# bot.py (Full Updated Code)
+
 import logging
-import asyncio
+import asyncio # <-- Naya import
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -11,14 +13,11 @@ from database.db import (
 )
 from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, get_title_key
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 logging.getLogger("pyromod").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-
-# Web Server Redirect Handler (for /get/... links)
 async def handle_redirect(request):
     file_unique_id = request.match_info.get('file_unique_id', None)
     if not file_unique_id: return web.Response(text="File ID missing.", status=400)
@@ -44,6 +43,12 @@ class Bot(Client):
         self.notification_flags = {}
         self.notification_timers = {}
         
+        # ================================================================= #
+        # VVVVVV YAHAN PAR NAYA CACHE SYSTEM ADD KIYA GAYA HAI VVVVVV #
+        # ================================================================= #
+        self.media_cache = {}
+        self.cache_lock = asyncio.Lock()
+        
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
 
@@ -52,6 +57,7 @@ class Bot(Client):
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
     async def _finalize_batch(self, user_id, batch_key):
+        # This function remains unchanged
         notification_messages = []
         try:
             if user_id not in self.open_batches or batch_key not in self.open_batches[user_id]: return
@@ -60,10 +66,6 @@ class Bot(Client):
             if not messages: return
             
             first_filename = getattr(messages[0], messages[0].media.value).file_name
-            
-            # ================================================================= #
-            # VVVVVV YAHAN PAR FIX KIYA GAYA HAI - Ab 3 values unpack honge VVVVVV #
-            # ================================================================= #
             batch_display_title, _, _ = clean_filename(first_filename)
 
             user = await get_user(user_id)
@@ -96,6 +98,7 @@ class Bot(Client):
                 del self.open_batches[user_id]
 
     async def file_processor_worker(self):
+        # This function remains unchanged
         logger.info("File Processor Worker started.")
         while True:
             try:
@@ -153,6 +156,7 @@ class Bot(Client):
                 logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
 
     async def send_with_protection(self, coro, *args, **kwargs):
+        # This function remains unchanged
         while True:
             try:
                 return await coro(*args, **kwargs)
@@ -162,6 +166,7 @@ class Bot(Client):
                 logger.error(f"SEND_PROTECTION: An error occurred: {e}"); raise
 
     async def start_web_server(self):
+        # This function remains unchanged
         from server.stream_routes import routes as stream_routes
         self.web_app = web.Application()
         self.web_app['bot'] = self
@@ -174,6 +179,7 @@ class Bot(Client):
         logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
 
     async def start(self):
+        # This function remains unchanged
         await super().start()
         self.me = await self.get_me()
         self.owner_db_channel_id = await get_owner_db_channel()
@@ -191,6 +197,7 @@ class Bot(Client):
         logger.info(f"Bot @{self.me.username} started successfully.")
 
     async def stop(self, *args):
+        # This function remains unchanged
         logger.info("Stopping bot...")
         if self.web_runner: await self.web_runner.cleanup()
         await super().stop()
