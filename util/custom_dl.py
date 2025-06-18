@@ -29,8 +29,9 @@ class ByteStreamer:
     async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
         """
         Handles both streaming ('inline') and downloading ('attachment').
-        - Validates cached files and serves with range support for both.
+        - Validates cached files and serves with range support.
         - Streams from Telegram while caching if no valid cache.
+        - Ensures full file delivery despite client disconnections.
         """
         try:
             message = await self.get_message(message_id)
@@ -83,6 +84,7 @@ class ByteStreamer:
                             async with aiofiles.open(file_path, "rb") as f:
                                 await f.seek(start)
                                 remaining = end - start + 1
+                                total_written = 0
                                 while remaining > 0:
                                     chunk_size = min(256*1024, remaining)
                                     chunk = await f.read(chunk_size)
@@ -90,11 +92,12 @@ class ByteStreamer:
                                         break
                                     try:
                                         await response.write(chunk)
+                                        total_written += len(chunk)
                                         remaining -= len(chunk)
                                     except (ClientConnectionResetError, ConnectionError):
                                         logger.warning(f"Client disconnected during range streaming for message_id: {message_id}")
                                         break
-                            logger.info(f"Served range {start}-{end} for message_id: {message_id}, size: {file_size}")
+                            logger.info(f"Served range {start}-{end} for message_id: {message_id}, written: {total_written}, expected: {end - start + 1}")
                             return response
                         except ValueError:
                             logger.warning(f"Invalid range header format for message_id: {message_id}, range: {range_header}")
@@ -115,8 +118,10 @@ class ByteStreamer:
                                 except (ClientConnectionResetError, ConnectionError):
                                     logger.warning(f"Client disconnected during full file streaming for message_id: {message_id}")
                                     break
-                        logger.info(f"Served full file for message_id: {message_id}, size: {total_written}")
-                        return response
+                            logger.info(f"Served full file for message_id: {message_id}, written: {total_written}, expected: {file_size}")
+                            if total_written != file_size:
+                                logger.warning(f"Incomplete download for message_id: {message_id}, written: {total_written}, expected: {file_size}")
+                            return response
 
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
             async with lock:
@@ -156,9 +161,10 @@ class ByteStreamer:
                                 break
                     
                     if os.path.exists(temp_file_path):
-                        if os.path.getsize(temp_file_path) > 0:
+                        temp_size = os.path.getsize(temp_file_path)
+                        if temp_size > 0:
                             os.rename(temp_file_path, file_path)
-                            logger.info(f"Caching complete for message_id: {message_id}, size: {total_written}")
+                            logger.info(f"Caching complete for message_id: {message_id}, size: {temp_size}")
                         else:
                             logger.warning(f"Empty temp file created for message_id: {message_id}")
                             os.remove(temp_file_path)
