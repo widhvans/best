@@ -1,37 +1,45 @@
-import jinja2
-import aiofiles
-import logging  # <-- FIX 1: Missing import add kiya gaya
-from pyrogram import Client
-from util.custom_dl import ByteStreamer  # Naye streaming engine ko import karein
+# util/render_template.py (NEW FILE)
 
-async def render_page(bot: Client, message_id: int):
+import logging
+import aiofiles
+from jinja2 import Template
+from pyrogram import Client
+
+# Is module ke liye logger configure karein
+logger = logging.getLogger(__name__)
+
+async def render_page(bot: Client, message_id: int) -> str:
     """
-    Naye streaming engine ka istemal karke watch page ke liye HTML template render karta hai.
+    File ki metadata prapt karta hai aur watch_page.html template ko render karta hai.
     """
-    streamer = ByteStreamer(bot)
-    file_name = "File"  # Default naam
+    file_name = "File"  # Error aane par default naam
 
     try:
-        # --- FIX 2: Naye engine ke sahi function (get_file_properties) ka istemal karein ---
-        file_id = await streamer.get_file_properties(message_id)
-        # Ab file_name seedhe file_id object se mil jayega
-        if file_id and file_id.file_name:
-            file_name = file_id.file_name.replace("_", " ")
+        # File ki details prapt karein
+        chat_id = bot.stream_channel_id or bot.owner_db_channel_id
+        if not chat_id:
+            raise ValueError("Streaming channels are not configured.")
+
+        message = await bot.get_messages(chat_id, message_id)
+        if message and message.media:
+            media = getattr(message, message.media.value)
+            file_name = getattr(media, "file_name", "File")
 
     except Exception as e:
-        # Agar file properties nahi milti hai, to error log karein
-        logging.error(f"Could not get file properties for watch page (message_id {message_id}): {e}")
+        logger.error(f"Could not get file properties for watch page (message_id {message_id}): {e}")
 
-    # Stream aur download URLs banayein
+    # URLs banayein
     stream_url = f"http://{bot.vps_ip}:{bot.vps_port}/stream/{message_id}"
     download_url = f"http://{bot.vps_ip}:{bot.vps_port}/download/{message_id}"
     
-    # Jinja2 template ko read aur render karein
     try:
-        async with aiofiles.open('template/watch_page.html', 'r') as f:
+        # HTML template ko read karein
+        async with aiofiles.open('template/watch_page.html', 'r', encoding='utf-8') as f:
             template_content = await f.read()
-        template = jinja2.Template(template_content)
-
+        
+        template = Template(template_content)
+        
+        # Template mein data daal kar HTML taiyaar karein
         return template.render(
             heading=f"Watch {file_name}",
             file_name=file_name,
@@ -39,8 +47,8 @@ async def render_page(bot: Client, message_id: int):
             download_url=download_url
         )
     except FileNotFoundError:
-        logging.error("FATAL: watch_page.html template not found in /template directory!")
-        return "<html><body><h1>500 Internal Server Error</h1><p>Template file not found.</p></body></html>"
+        logger.error("FATAL: 'template/watch_page.html' not found. Please ensure the template file exists.")
+        return "Internal Server Error: Template file not found."
     except Exception as e:
-        logging.error(f"Error rendering template: {e}", exc_info=True)
-        return "<html><body><h1>500 Internal Server Error</h1><p>Could not render template.</p></body></html>"
+        logger.error(f"Error rendering Jinja2 template: {e}", exc_info=True)
+        return "Internal Server Error: Template rendering failed."
