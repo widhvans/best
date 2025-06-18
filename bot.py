@@ -2,13 +2,14 @@ import logging
 import asyncio
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyromod import Client
 from aiohttp import web
 from config import Config
 from database.db import (
-    get_user, save_file_data, get_owner_db_channel, get_stream_channel
+    get_user, save_file_data, get_owner_db_channel, get_stream_channel, get_file_by_unique_id
 )
-from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, get_title_key
+from utils.helpers import clean_filename, notify_and_remove_invalid_channel, get_title_key, get_poster
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
@@ -43,7 +44,6 @@ class Bot(Client):
         self.notification_flags = {}
         self.notification_timers = {}
         
-        # Add config values to instance for easy access in web handlers
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
 
@@ -51,88 +51,104 @@ class Bot(Client):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
+    # --- MODIFIED: _finalize_batch now sends files with attached buttons ---
     async def _finalize_batch(self, user_id, batch_key):
-        notification_messages = []
         try:
             if user_id not in self.open_batches or batch_key not in self.open_batches[user_id]: return
             batch_data = self.open_batches[user_id].pop(batch_key)
             messages = batch_data['messages']
             if not messages: return
-            
-            first_filename = getattr(messages[0], messages[0].media.value).file_name
-            batch_display_title, _ = clean_filename(first_filename)
 
             user = await get_user(user_id)
+            if not user: return
+            
             post_channels = user.get('post_channels', [])
-            if not user or not post_channels: return
-
             valid_post_channels = []
             for channel_id in post_channels:
                 if await notify_and_remove_invalid_channel(self, user_id, channel_id, "Post"):
                     valid_post_channels.append(channel_id)
             
             if not valid_post_channels:
-                logger.warning(f"User {user_id} has no valid post channels for batch '{batch_display_title}'.")
-                await self.send_message(user_id, f"⚠️ Could not post the batch for **{batch_display_title}** because you have no valid Post Channels configured.")
+                logger.warning(f"User {user_id} has no valid post channels for batch key '{batch_key}'.")
                 return
 
-            for channel_id in valid_post_channels:
-                if not self.notification_flags.get(channel_id):
-                    self.notification_flags[channel_id] = True
-                    logger.info(f"Sending 'coming soon' notification to {channel_id}.")
-                    msg = await self.send_with_protection(self.send_message, channel_id, "<i>✨ New releases are coming...</i>", parse_mode=ParseMode.HTML)
-                    if msg: notification_messages.append(msg)
-                    if self.notification_timers.get(channel_id): self.notification_timers[channel_id].cancel()
-                    self.notification_timers[channel_id] = asyncio.get_event_loop().call_later(60, self._reset_notification_flag, channel_id)
+            # --- Poster Logic ---
+            if user.get('show_poster', True):
+                first_filename = getattr(messages[0], messages[0].media.value).file_name
+                primary_title, year = clean_filename(first_filename)
+                poster = await get_poster(primary_title, year)
+                if poster:
+                    for channel_id in valid_post_channels:
+                        try:
+                            await self.send_photo(channel_id, photo=poster, caption=f"🎬 **{primary_title}**")
+                        except Exception as e:
+                            logger.error(f"Failed to send poster to {channel_id}: {e}")
 
-            posts_to_send = await create_post(self, user_id, messages)
-            
-            for channel_id in valid_post_channels:
-                for post in posts_to_send:
-                    poster, caption, footer = post
-                    if poster: await self.send_with_protection(self.send_photo, channel_id, poster, caption=caption, reply_markup=footer)
-                    else: await self.send_with_protection(self.send_message, channel_id, caption, reply_markup=footer, disable_web_page_preview=True)
-                    await asyncio.sleep(2)
-        except Exception as e: logger.exception(f"Error finalizing batch {batch_key}: {e}")
+            # --- File Sending Logic ---
+            for message in messages:
+                media = getattr(message, message.media.value, None)
+                if not media: continue
+
+                file_doc = await get_file_by_unique_id(media.file_unique_id)
+                if not file_doc: continue
+                
+                # Create vertical buttons for this specific file
+                get_link = f"http://{self.vps_ip}:{self.vps_port}/get/{file_doc['file_unique_id']}"
+                watch_link = f"http://{self.vps_ip}:{self.vps_port}/watch/{file_doc['stream_id']}"
+                
+                buttons = [
+                    [InlineKeyboardButton("📥 Download (İndir)", url=get_link)],
+                    [InlineKeyboardButton("▶️ Watch Online (Çevrimiçi İzle)", url=watch_link)]
+                ]
+                
+                # Add user's custom footer buttons
+                user_footer_buttons = user.get('footer_buttons', [])
+                for btn in user_footer_buttons:
+                    buttons.append([InlineKeyboardButton(btn['name'], url=btn['url'])])
+
+                keyboard = InlineKeyboardMarkup(buttons)
+                
+                # Send the file with attached buttons to all post channels
+                for channel_id in valid_post_channels:
+                    await self.send_with_protection(
+                        message.copy,
+                        chat_id=channel_id,
+                        reply_markup=keyboard,
+                        caption=f"`{media.file_name}`" # Add filename as caption
+                    )
+                    await asyncio.sleep(2) # Avoid flood waits
+                    
+        except Exception as e:
+            logger.exception(f"Error finalizing batch {batch_key}: {e}")
         finally:
-            for sent_msg in notification_messages:
-                await self.send_with_protection(sent_msg.delete)
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
+    # --- END MODIFIED ---
 
-    # --- MODIFIED: file_processor_worker is now more flexible ---
     async def file_processor_worker(self):
         logger.info("File Processor Worker started.")
         while True:
             try:
                 message, user_id = await self.file_queue.get()
                 
-                # Ensure Owner DB is set, it's mandatory.
                 if not self.owner_db_channel_id: self.owner_db_channel_id = await get_owner_db_channel()
                 if not self.owner_db_channel_id:
                     logger.error("Owner DB Channel is mandatory and not set. File processing skipped.")
                     continue
 
-                # Ensure Stream Channel is loaded, but it's not mandatory.
                 if not self.stream_channel_id: self.stream_channel_id = await get_stream_channel()
                 
-                # 1. Copy to the Owner DB. This is always required.
                 copied_message = await self.send_with_protection(message.copy, self.owner_db_channel_id)
                 if not copied_message: continue
 
-                # 2. Determine the stream message.
-                # If a separate stream channel is configured, copy the file there too.
                 if self.stream_channel_id and self.stream_channel_id != self.owner_db_channel_id:
                     stream_message = await self.send_with_protection(message.copy, self.stream_channel_id)
                     if not stream_message: continue
                 else:
-                    # Otherwise, use the same message from the Owner DB for streaming.
                     stream_message = copied_message
 
-                # 3. Save both message IDs to the database. They might be the same, which is fine.
                 await save_file_data(user_id, message, copied_message, stream_message)
                 
-                # The rest of the batching logic remains the same
                 filename = getattr(copied_message, copied_message.media.value).file_name
                 title_key = get_title_key(filename)
                 if not title_key:
@@ -157,7 +173,6 @@ class Bot(Client):
                 logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
             finally:
                 self.file_queue.task_done()
-    # --- END MODIFIED ---
     
     async def send_with_protection(self, coro, *args, **kwargs):
         while True:
@@ -170,13 +185,10 @@ class Bot(Client):
 
     async def start_web_server(self):
         from server.stream_routes import routes as stream_routes
-        
         self.web_app = web.Application()
         self.web_app['bot'] = self
-        
         self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
         self.web_app.add_routes(stream_routes)
-        
         self.web_runner = web.AppRunner(self.web_app)
         await self.web_runner.setup()
         site = web.TCPSite(self.web_runner, self.vps_ip, self.vps_port)
@@ -186,25 +198,18 @@ class Bot(Client):
     async def start(self):
         await super().start()
         self.me = await self.get_me()
-        
         self.owner_db_channel_id = await get_owner_db_channel()
         self.stream_channel_id = await get_stream_channel()
-        
         if self.owner_db_channel_id: logger.info(f"Loaded Owner DB ID [{self.owner_db_channel_id}]")
         else: logger.warning("Owner DB ID not set. Use 'Set Owner DB' as admin.")
-        
         if self.stream_channel_id: logger.info(f"Loaded Stream Channel ID [{self.stream_channel_id}]")
         else: logger.info("Stream Channel not set. Will use Owner DB for streaming.")
-            
         try:
             with open(Config.BOT_USERNAME_FILE, 'w') as f: f.write(f"@{self.me.username}")
             logger.info(f"Updated bot username to @{self.me.username}")
         except Exception as e: logger.error(f"Could not write to {Config.BOT_USERNAME_FILE}: {e}")
-        
         asyncio.create_task(self.file_processor_worker())
-        
         await self.start_web_server()
-        
         logger.info(f"Bot @{self.me.username} started successfully.")
 
     async def stop(self, *args):
