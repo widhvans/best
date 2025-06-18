@@ -40,23 +40,24 @@
                 const data = await response.json();
 
                 if (data.status === 'downloading') {
-                    progressElement.style.width = data.progress + '%';
-                    progressTextElement.innerText = data.progress + '%';
-                    setTimeout(checkStatus, 1000); // Check again after 1 second
+                    let progress = Math.min(data.progress, 100); // Progress ko 100 se upar na jaane dein
+                    progressElement.style.width = progress + '%';
+                    progressTextElement.innerText = progress + '%';
+                    setTimeout(checkStatus, 1500); // Har 1.5 second mein check karein
                 } else if (data.status === 'completed') {
                     progressElement.style.width = '100%';
                     progressTextElement.innerText = '100% - Redirecting...';
-                    window.location.href = finalUrl; // Redirect to the final stream/download link
+                    window.location.href = finalUrl; // Final stream/download link par redirect karein
                 } else {
-                    progressTextElement.innerText = 'Error preparing file. Please try again.';
+                    progressTextElement.innerText = 'Error preparing file. Please try refreshing the page.';
                 }
             } catch (error) {
                 progressTextElement.innerText = 'Connection error. Retrying...';
-                setTimeout(checkStatus, 2000); // Retry after 2 seconds on error
+                setTimeout(checkStatus, 3000); // Error aane par 3 second baad retry karein
             }
         };
 
-        // Start checking the status
+        // Status check karna shuru karein
         checkStatus();
     </script>
 </body>
