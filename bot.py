@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import socket  # <-- Naya zaroori import
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -29,16 +30,13 @@ async def handle_redirect(request):
 
 class Bot(Client):
     def __init__(self):
-        # ================================================================= #
-        # VVVVVV FIX 1: Bot ki concurrency badhane ke liye workers add kiye gaye VVVVVV #
-        # ================================================================= #
         super().__init__(
             "FinalStorageBot",
             api_id=Config.API_ID,
             api_hash=Config.API_HASH,
             bot_token=Config.BOT_TOKEN,
             plugins=dict(root="handlers"),
-            workers=100  # Increased workers for better performance
+            workers=100
         )
         self.me = None
         self.web_app = None
@@ -177,14 +175,21 @@ class Bot(Client):
         await self.web_runner.setup()
         
         # ================================================================= #
-        # VVVVVV FIX 2: Latency kam karne ke liye tcp_nodelay enable kiya gaya VVVVVV #
+        # VVVVVV YAHAN PAR 'TCP_NODELAY' SET KARNE KA SAHI TAREEKA HAI VVVVVV #
         # ================================================================= #
-        site = web.TCPSite(
-            self.web_runner,
-            self.vps_ip,
-            self.vps_port,
-            tcp_nodelay=True  # Disables Nagle's algorithm for lower latency
-        )
+        
+        # Step 1: Ek standard socket banayein
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        # Step 2: Socket par performance options set karein
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Latency kam karne ke liye
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Turant restart ke liye
+        
+        # Step 3: Socket ko address se bind karein
+        sock.bind((self.vps_ip, self.vps_port))
+        
+        # Step 4: Is custom socket par web server banayein
+        site = web.TCPSite(self.web_runner, sock=sock)
         
         await site.start()
         logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port} with performance optimizations.")
