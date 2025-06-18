@@ -10,36 +10,20 @@ from features.shortener import get_shortlink
 
 logger = logging.getLogger(__name__)
 
-# --- NEW: Handler for files sent directly to the bot in PM ---
 @Client.on_message(filters.private & ~filters.command("start") & (filters.document | filters.video | filters.audio))
 async def handle_private_file(client, message):
-    """
-    Handles files sent in PM.
-    Replies with the same file with Download and Watch Online buttons.
-    """
-    # Check if admin has set the Owner DB channel, which is used for storing the file.
     if not client.owner_db_channel_id:
         return await message.reply_text("Bot is not yet configured by the admin. Please try again later.")
-        
     processing_msg = await message.reply_text("⏳ Processing your file...", quote=True)
-    
     try:
-        # Copy the file to the Owner DB to get a permanent message ID for streaming
         copied_message = await message.copy(client.owner_db_channel_id)
-        
-        # Generate stream and download links using the new message ID
-        # Note: /stream/ is a direct download link, /watch/ is the player page.
         download_link = f"http://{client.vps_ip}:{client.vps_port}/stream/{copied_message.id}"
         watch_link = f"http://{client.vps_ip}:{client.vps_port}/watch/{copied_message.id}"
-        
-        # Create vertical buttons
         buttons = [
             [InlineKeyboardButton("📥 Download (İndir)", url=download_link)],
             [InlineKeyboardButton("▶️ Watch Online (Çevrimiçi İzle)", url=watch_link)]
         ]
         keyboard = InlineKeyboardMarkup(buttons)
-        
-        # Reply to the user with the file and the buttons
         await message.reply_cached_media(
             file_id=message.media.file_id,
             caption=f"`{message.media.file_name}`",
@@ -47,46 +31,57 @@ async def handle_private_file(client, message):
             quote=True
         )
         await processing_msg.delete()
-
     except Exception as e:
         logger.exception("Error in handle_private_file")
         await processing_msg.edit_text(f"An error occurred: {e}")
-# --- END NEW ---
 
-
+# --- MODIFIED: send_file now sends the file with Download/Watch buttons ---
 async def send_file(client, user_id, file_unique_id):
-    # ... (This function remains unchanged)
+    """
+    This function is called at the end of the /get/... link process.
+    It now sends the file with Download and Watch Online buttons attached.
+    """
     try:
         file_data = await get_file_by_unique_id(file_unique_id)
         if not file_data:
             return await client.send_message(user_id, "Sorry, this file is no longer available.")
         
-        owner_db_id = await get_owner_db_channel()
-        if not owner_db_id:
+        # The Owner DB channel is where the file is stored.
+        # It's also used for streaming if a separate stream channel isn't set.
+        storage_channel_id = await get_owner_db_channel()
+        if not storage_channel_id:
             logger.error("Owner DB Channel not set, cannot send file.")
-            return await client.send_message(user_id, "A configuration error occurred.")
+            return await client.send_message(user_id, "A configuration error occurred on the bot.")
 
-        owner_settings = await get_user(file_data['owner_id'])
-        filename_url = owner_settings.get("filename_url")
-        file_name = file_data.get('file_name', 'N/A')
+        # Generate the stream and download links
+        download_link = f"http://{client.vps_ip}:{client.vps_port}/stream/{file_data['stream_id']}"
+        watch_link = f"http://{client.vps_ip}:{client.vps_port}/watch/{file_data['stream_id']}"
         
-        if filename_url:
-            caption = f"✅ **Here is your file!**\n\n**[{file_name}]({filename_url})**"
-        else:
-            caption = f"✅ **Here is your file!**\n\n`{file_name}`"
+        # Create the vertical buttons
+        buttons = [
+            [InlineKeyboardButton("📥 Download (İndir)", url=download_link)],
+            [InlineKeyboardButton("▶️ Watch Online (Çevrimiçi İzle)", url=watch_link)]
+        ]
+        keyboard = InlineKeyboardMarkup(buttons)
+        
+        # Prepare the final caption
+        file_name = file_data.get('file_name', 'N/A')
+        caption = f"✅ **Here is your file!**\n\n`{file_name}`"
 
+        # Copy the file message from storage to the user with the new caption and buttons
         await client.copy_message(
             chat_id=user_id,
-            from_chat_id=owner_db_id,
+            from_chat_id=storage_channel_id,
             message_id=file_data['file_id'],
             caption=caption,
-            parse_mode=enums.ParseMode.MARKDOWN
+            reply_markup=keyboard  # Attach the buttons
         )
     except Exception:
         logger.exception("Error in send_file function")
         await client.send_message(user_id, "Something went wrong while sending the file.")
+# --- END MODIFIED ---
 
-# ... (The rest of start.py remains the same) ...
+
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     if message.from_user.is_bot: return
@@ -110,6 +105,7 @@ async def start_command(client, message):
                         if claim_successful:
                             await client.send_message(user_id, "✅ **Verification Successful!**\n\nThis link has now been used. For the next 12 hours, you will get direct links from this user's channels without extra steps.")
                 
+                # This is the final step, send the file with buttons
                 await send_file(client, user_id, file_unique_id)
 
             elif payload.startswith("ownerget_"):
@@ -146,25 +142,16 @@ async def handle_public_file_request(client, message, user_id, payload):
     if fsub_channel:
         try:
             await client.get_chat_member(chat_id=fsub_channel, user_id="me")
-            
             try:
                 await client.get_chat_member(chat_id=fsub_channel, user_id=user_id)
             except UserNotParticipant:
-                try: 
-                    invite_link = await client.export_chat_invite_link(fsub_channel)
-                except Exception: 
-                    invite_link = None
+                try: invite_link = await client.export_chat_invite_link(fsub_channel)
+                except Exception: invite_link = None
                 buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
                 return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
-
         except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
             logger.error(f"FSub channel error for owner {owner_id} (Channel: {fsub_channel}): {e}")
-            
-            await client.send_message(
-                chat_id=owner_id,
-                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is no longer accessible. It has been automatically disabled."
-            )
-            
+            await client.send_message(chat_id=owner_id, text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is no longer accessible.")
             await update_user(owner_id, "fsub_channel", None)
             pass
     
@@ -180,27 +167,22 @@ async def handle_public_file_request(client, message, user_id, payload):
         buttons.append([InlineKeyboardButton("➡️ Get Your File ⬅️", url=final_delivery_link)])
     else:
         if shortener_mode == 'each_time':
-            text = "**Your file is almost ready!**\n\n1. Click the button above to complete the task.\n2. You will be automatically redirected back, and I will send you the file."
+            text = "**Your file is almost ready!**\n\n1. Click the button above.\n2. You will be redirected back, and I will send you the file."
             shortened_link = await get_shortlink(final_delivery_link, owner_id)
             buttons.append([InlineKeyboardButton("➡️ Click Here to Get Your File ⬅️", url=shortened_link)])
-        
         elif shortener_mode == '12_hour':
             if await is_user_verified(user_id, owner_id):
-                text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click the button below to get your file directly."
+                text = "✅ **You are verified!**\n\nYour 12-hour verification is active. Click below to get your file directly."
                 buttons.append([InlineKeyboardButton("➡️ Get Your File Directly ⬅️", url=final_delivery_link)])
             else:
-                text = "**One-Time Verification Required**\n\nTo get direct file access for the next 12 hours, please complete this one-time verification step by clicking the button below."
+                text = "**One-Time Verification Required**\n\nTo get direct access for 12 hours, please complete this one-time verification step."
                 shortened_link = await get_shortlink(final_delivery_link, owner_id)
                 buttons.append([InlineKeyboardButton("➡️ Click to Verify (12 Hours) ⬅️", url=shortened_link)])
 
     if owner_settings.get("how_to_download_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=owner_settings["how_to_download_link"])])
     
-    await message.reply_text(
-        text, 
-        reply_markup=InlineKeyboardMarkup(buttons),
-        disable_web_page_preview=True
-    )
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
 
 @Client.on_callback_query(filters.regex(r"^retry_"))
 async def retry_handler(client, query):
@@ -214,12 +196,7 @@ async def go_back_callback(client, query):
         return await query.answer("This is not for you!", show_alert=True)
     try:
         menu_text, menu_markup = await get_main_menu(user_id)
-        await query.message.edit_text(
-            text=menu_text, 
-            reply_markup=menu_markup, 
-            parse_mode=enums.ParseMode.MARKDOWN,
-            disable_web_page_preview=True
-        )
+        await query.message.edit_text(text=menu_text, reply_markup=menu_markup, parse_mode=enums.ParseMode.MARKDOWN, disable_web_page_preview=True)
     except MessageNotModified:
         await query.answer()
     except Exception as e:
