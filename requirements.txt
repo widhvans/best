@@ -1,3 +1,5 @@
+# requirements.txt (Updated)
+
 pyrogram==2.0.106
 tgcrypto
 motor
@@ -12,3 +14,5 @@ jinja2
 aiofiles
 python-dotenv
 pymongo
+# New library for advanced filename parsing
+parse-torrent-name
