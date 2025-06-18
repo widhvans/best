@@ -24,42 +24,31 @@ class ByteStreamer:
 
     async def _get_session(self, dc_id: int):
         """
-        Helper function to get or create a session for a specific Data Center.
-        This is crucial for handling FileMigrate errors.
+        Gets a session from the pool or creates a new, stable one if it doesn't exist.
+        This is the core of the load-handling fix.
         """
         session = self.client.media_sessions.get(dc_id)
         
+        # Agar is DC ke liye session pehle se nahi hai, to hi naya banayein
         if session is None:
-            # Agar is DC ke liye session nahi hai, to naya banayein
+            logger.info(f"Creating new, stable media session for DC {dc_id}...")
+            # Naya authorization key banayein, jo bot accounts ke liye sabse stable tareeka hai
             session = Session(
                 self.client, dc_id, await Auth(self.client, dc_id, await self.client.storage.test_mode()).create(),
                 await self.client.storage.test_mode(), is_media=True
             )
             await session.start()
-            
-            try:
-                # Naye session ke liye authorization import karein
-                exported_auth = await self.client.invoke(
-                    raw.functions.auth.ExportAuthorization(dc_id=dc_id)
-                )
-                await session.invoke(
-                    raw.functions.auth.ImportAuthorization(
-                        id=exported_auth.id, bytes=exported_auth.bytes
-                    )
-                )
-            except AuthBytesInvalid:
-                logger.error(f"Failed to import authorization to DC {dc_id}. This may cause issues.", exc_info=True)
-
+            # Naye session ko pool mein save karein taaki dobara istemal ho sake
             self.client.media_sessions[dc_id] = session
+            logger.info(f"Successfully created and cached new session for DC {dc_id}.")
         
         return session
 
     async def yield_file(self, file_id, offset, first_part_cut, last_part_cut, part_count, chunk_size):
-        location = self.get_location(file_id)
-        current_part = 1
-        
         # File ke original DC se shuru karein
         media_session = await self._get_session(file_id.dc_id)
+        location = self.get_location(file_id)
+        current_part = 1
 
         while current_part <= part_count:
             try:
@@ -70,10 +59,11 @@ class ByteStreamer:
                         offset=offset,
                         limit=chunk_size
                     ),
-                    retries=0 # Hum manually retry handle karenge
+                    retries=0
                 )
                 
                 if isinstance(chunk, raw.types.upload.File):
+                    # Pehle aur aakhri chunk ko kaat kar bhejein
                     if current_part == 1 and part_count > 1:
                         yield chunk.bytes[first_part_cut:]
                     elif current_part == part_count and part_count > 1:
@@ -87,14 +77,9 @@ class ByteStreamer:
                     break
             
             except FileMigrate as e:
-                # ================================================================= #
-                # VVVVVV YAHAN PAR MAGICAL FIX HAI - FILE MIGRATE ERROR HANDLING VVVVVV #
-                # ================================================================= #
                 logger.warning(f"File migrated to DC {e.value}. Following file to new DC...")
-                
-                # Naye DC ke liye naya session prapt karein
+                # Naye DC ke liye naya session prapt karein (ya pool se lein)
                 media_session = await self._get_session(e.value)
-                
                 # Is chunk ko dobara naye session se try karein
                 continue
             
