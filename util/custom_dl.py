@@ -29,8 +29,8 @@ class ByteStreamer:
     async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
         """
         Handles both streaming ('inline') and downloading ('attachment').
-        - If file is cached, serves it with range support.
-        - If not, streams from Telegram while caching.
+        - Validates cached files and serves with range support.
+        - Streams from Telegram while caching if no valid cache.
         """
         try:
             message = await self.get_message(message_id)
@@ -42,56 +42,60 @@ class ByteStreamer:
             file_path = os.path.join(DOWNLOAD_DIR, f"{message_id}_{file_name.replace('/', '_')}")
 
             if os.path.exists(file_path):
-                logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk with disposition: {disposition}")
                 file_size = os.path.getsize(file_path)
-                headers = {
-                    "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
-                    "Content-Disposition": f'{disposition}; filename="{file_name}"',
-                    "Accept-Ranges": "bytes",
-                    "Content-Length": str(file_size),
-                }
+                if file_size == 0:
+                    logger.warning(f"Empty cached file for message_id: {message_id}. Removing and re-streaming.")
+                    os.remove(file_path)
+                else:
+                    logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk with disposition: {disposition}")
+                    headers = {
+                        "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                        "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                        "Accept-Ranges": "bytes",
+                        "Content-Length": str(file_size),
+                    }
 
-                range_header = request.headers.get("Range")
-                if range_header:
-                    try:
-                        start, end = range_header.replace("bytes=", "").split("-")
-                        start = int(start) if start else 0
-                        end = int(end) if end else file_size - 1
-                        if start >= file_size or end >= file_size or start > end:
-                            logger.warning(f"Invalid range request for message_id: {message_id}, start: {start}, end: {end}, file_size: {file_size}")
+                    range_header = request.headers.get("Range")
+                    if range_header:
+                        try:
+                            start, end = range_header.replace("bytes=", "").split("-")
+                            start = int(start) if start else 0
+                            end = int(end) if end else file_size - 1
+                            if start >= file_size or end >= file_size or start > end or start < 0 or end < 0:
+                                logger.warning(f"Invalid range request for message_id: {message_id}, start: {start}, end: {end}, file_size: {file_size}")
+                                headers.update({
+                                    "Content-Range": f"bytes */{file_size}",
+                                })
+                                return web.StreamResponse(status=416, headers=headers)
+                            headers.update({
+                                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                                "Content-Length": str(end - start + 1),
+                            })
+                            response = web.StreamResponse(status=206, headers=headers)
+                            await response.prepare(request)
+                            async with aiofiles.open(file_path, "rb") as f:
+                                await f.seek(start)
+                                remaining = end - start + 1
+                                while remaining > 0:
+                                    chunk_size = min(256*1024, remaining)
+                                    chunk = await f.read(chunk_size)
+                                    if not chunk:
+                                        break
+                                    await response.write(chunk)
+                                    remaining -= len(chunk)
+                            return response
+                        except ValueError:
+                            logger.warning(f"Invalid range header format for message_id: {message_id}, range: {range_header}")
                             headers.update({
                                 "Content-Range": f"bytes */{file_size}",
                             })
                             return web.StreamResponse(status=416, headers=headers)
-                        headers.update({
-                            "Content-Range": f"bytes {start}-{end}/{file_size}",
-                            "Content-Length": str(end - start + 1),
-                        })
-                        response = web.StreamResponse(status=206, headers=headers)
-                        await response.prepare(request)
-                        async with aiofiles.open(file_path, "rb") as f:
-                            await f.seek(start)
-                            remaining = end - start + 1
-                            while remaining > 0:
-                                chunk_size = min(256*1024, remaining)
-                                chunk = await f.read(chunk_size)
-                                if not chunk:
-                                    break
-                                await response.write(chunk)
-                                remaining -= len(chunk)
-                        return response
-                    except ValueError:
-                        logger.warning(f"Invalid range header format for message_id: {message_id}, range: {range_header}")
-                        headers.update({
-                            "Content-Range": f"bytes */{file_size}",
-                        })
-                        return web.StreamResponse(status=416, headers=headers)
-                else:
-                    return web.FileResponse(
-                        file_path,
-                        chunk_size=256*1024,
-                        headers=headers
-                    )
+                    else:
+                        return web.FileResponse(
+                            file_path,
+                            chunk_size=256*1024,
+                            headers=headers
+                        )
 
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
             async with lock:
@@ -129,8 +133,12 @@ class ByteStreamer:
                                 break
                     
                     if os.path.exists(temp_file_path):
-                        os.rename(temp_file_path, file_path)
-                        logger.info(f"Caching complete for message_id: {message_id}")
+                        if os.path.getsize(temp_file_path) > 0:
+                            os.rename(temp_file_path, file_path)
+                            logger.info(f"Caching complete for message_id: {message_id}")
+                        else:
+                            logger.warning(f"Empty temp file created for message_id: {message_id}")
+                            os.remove(temp_file_path)
                     else:
                         logger.warning(f"Temporary file not found after streaming for message_id: {message_id}")
 
