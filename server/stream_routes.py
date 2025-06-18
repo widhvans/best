@@ -1,4 +1,4 @@
-# server/stream_routes.py (The Final Stable Version)
+# server/stream_routes.py (The Final "Byte-Level Translator" Version)
 
 import logging
 import asyncio
@@ -12,20 +12,16 @@ routes = web.RouteTableDef()
 
 async def get_media_meta(message_id, bot):
     """
-    Ek central function jo file ki details ko cache se laata hai ya zaroorat padne par fetch karke cache karta hai.
+    A central function to get file details from cache or fetch and cache them.
     """
     async with bot.cache_lock:
         media_meta = bot.media_cache.get(message_id)
         if not media_meta:
-            logger.info(f"Cache MISS for message_id: {message_id}. Fetching from Telegram.")
             chat_id = bot.stream_channel_id or bot.owner_db_channel_id
-            if not chat_id:
-                raise ValueError("Streaming channels not configured.")
+            if not chat_id: raise ValueError("Streaming channels not configured.")
             
             message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
-
-            if not message or not message.media:
-                raise FileIdInvalid(f"Message {message_id} not found or has no media.")
+            if not message or not message.media: raise FileIdInvalid(f"Message {message_id} not found.")
             
             media = getattr(message, message.media.value)
             media_meta = {
@@ -35,39 +31,13 @@ async def get_media_meta(message_id, bot):
                 "mime_type": getattr(media, "mime_type", "application/octet-stream")
             }
             bot.media_cache[message_id] = media_meta
-        else:
-            logger.info(f"Cache HIT for message_id: {message_id}. Using memory cache.")
     return media_meta
-
-
-async def producer(bot, message_id):
-    """
-    Dedicated downloader (Producer). File download karke queue mein daalta hai.
-    """
-    producer_info = bot.stream_producers[message_id]
-    try:
-        media_meta = await get_media_meta(message_id, bot)
-        message = media_meta["message_object"]
-        streamer = bot.stream_media(message)
-        
-        async for chunk in streamer:
-            await producer_info['queue'].put(chunk)
-            
-    except Exception as e:
-        logger.error(f"Producer for message {message_id} failed: {e}", exc_info=True)
-        await producer_info['queue'].put(None)
-    finally:
-        await producer_info['queue'].put(None)
-        logger.info(f"Producer for message {message_id} has finished.")
 
 
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
     bot_username = request.app['bot'].me.username
-    return web.json_response({
-        "server_status": "running",
-        "bot_status": f"connected_as @{bot_username}"
-    })
+    return web.json_response({"server_status": "running", "bot_status": f"connected_as @{bot_username}"})
 
 
 @routes.get("/favicon.ico", allow_head=True)
@@ -80,58 +50,94 @@ async def watch_handler(request: web.Request):
     try:
         message_id = int(request.match_info["message_id"])
         bot = request.app['bot']
-        
         html_content = await render_page(bot, message_id)
-        
         return web.Response(text=html_content, content_type='text/html')
     except Exception as e:
         logger.critical(f"Unexpected error in watch handler: {e}", exc_info=True)
         return web.Response(text="Internal Server Error", status=500)
 
 
-async def stream_or_download(request: web.Request, disposition: str):
+async def stream_handler_controller(request: web.Request, disposition: str):
+    """
+    The master streaming controller with manual offset alignment.
+    This is the definitive fix for external player buffering.
+    """
     bot = request.app['bot']
     message_id_str = request.match_info.get("message_id")
     try:
         message_id = int(message_id_str)
         
-        lock = bot.stream_locks.setdefault(message_id, asyncio.Lock())
-        
-        async with lock:
-            if message_id not in bot.stream_producers:
-                queue = asyncio.Queue()
-                task = asyncio.create_task(producer(bot, message_id))
-                bot.stream_producers[message_id] = {'task': task, 'queue': queue}
-                logger.info(f"Started new producer task for message_id: {message_id}")
-
-        producer_info = bot.stream_producers[message_id]
-        
         media_meta = await get_media_meta(message_id, bot)
+        message = media_meta["message_object"]
+        file_size = media_meta["file_size"]
+        
+        range_header = request.headers.get("Range")
         
         headers = {
             "Content-Type": media_meta["mime_type"],
-            "Content-Disposition": f'{disposition}; filename="{media_meta["file_name"]}"',
-            "Content-Length": str(media_meta["file_size"])
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'{disposition}; filename="{media_meta["file_name"]}"'
         }
         
-        response = web.StreamResponse(status=200, headers=headers)
+        if range_header:
+            from_bytes, until_bytes = 0, file_size - 1
+            try:
+                range_spec = range_header.split("=")[1]
+                from_bytes_str, until_bytes_str = range_spec.split("-")
+                from_bytes = int(from_bytes_str)
+                if until_bytes_str: until_bytes = int(until_bytes_str)
+            except (ValueError, IndexError):
+                return web.Response(status=400, text="Invalid Range header")
+
+            if from_bytes >= file_size or until_bytes >= file_size:
+                return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+            bytes_to_send = until_bytes - from_bytes + 1
+            headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
+            headers["Content-Length"] = str(bytes_to_send)
+            status_code = 206
+        else:
+            from_bytes = 0
+            bytes_to_send = file_size
+            headers["Content-Length"] = str(file_size)
+            status_code = 200
+
+        response = web.StreamResponse(status=status_code, headers=headers)
         await response.prepare(request)
         
-        queue = producer_info['queue']
+        # ================================================================= #
+        # VVVVVV YAHAN HAI ASLI JAADU - BYTE-LEVEL TRANSLATOR LOGIC VVVVVV #
+        # ================================================================= #
+        
+        # Telegram se hamesha 4096 ke multiple par hi data maangein
+        block_size = 4096
+        aligned_offset = (from_bytes // block_size) * block_size
+        bytes_to_skip = from_bytes - aligned_offset
 
-        while True:
-            chunk = await queue.get()
-            
-            if chunk is None:
-                break
+        downloader = bot.stream_media(message, offset=aligned_offset)
+
+        bytes_sent = 0
+        first_chunk = True
+        async for chunk in downloader:
+            if not chunk: break
+
+            if first_chunk:
+                chunk = chunk[bytes_to_skip:]
+                first_chunk = False
+
+            if bytes_sent + len(chunk) > bytes_to_send:
+                chunk = chunk[:bytes_to_send - bytes_sent]
             
             try:
                 await response.write(chunk)
-                await asyncio.sleep(0)
+                bytes_sent += len(chunk)
             except (ConnectionError, asyncio.CancelledError):
-                logger.warning(f"Consumer for message {message_id} disconnected.")
+                logger.warning(f"Client disconnected for message {message_id}.")
                 break
-        
+            
+            if bytes_sent >= bytes_to_send:
+                break
+                
         return response
 
     except (FileIdInvalid, ValueError) as e:
@@ -144,9 +150,9 @@ async def stream_or_download(request: web.Request, disposition: str):
 
 @routes.get("/stream/{message_id:\\d+}", allow_head=True)
 async def stream_handler(request: web.Request):
-    return await stream_or_download(request, "inline")
+    return await stream_handler_controller(request, "inline")
 
 
 @routes.get("/download/{message_id:\\d+}", allow_head=True)
 async def download_handler(request: web.Request):
-    return await stream_or_download(request, "attachment")
+    return await stream_handler_controller(request, "attachment")
