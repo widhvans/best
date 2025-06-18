@@ -1,9 +1,11 @@
-# server/stream_routes.py (The Final "Super Fix" Version)
+# server/stream_routes.py (The Final Bulletproof Version)
 
 import logging
 import asyncio
+import math
 from aiohttp import web
-from pyrogram.errors import FileIdInvalid
+from util.custom_dl import ByteStreamer
+from util.file_properties import get_file_properties, FileIdError
 from util.render_template import render_page 
 
 logger = logging.getLogger(__name__)
@@ -37,102 +39,66 @@ async def watch_handler(request: web.Request):
 
 
 async def stream_or_download(request: web.Request, disposition: str):
-    """
-    Handles streaming with full support for HTTP Range Requests,
-    enabling seeking and faster buffering in external players.
-    This is the most robust implementation for performance.
-    """
-    bot = request.app['bot']
     message_id_str = request.match_info.get("message_id")
     try:
         message_id = int(message_id_str)
+        bot = request.app['bot']
+        streamer = ByteStreamer(bot)
+
+        file_id = await streamer.get_file_properties(message_id)
         
-        # Metadata Caching ka istemal karein
-        async with bot.cache_lock:
-            media_meta = bot.media_cache.get(message_id)
-            if not media_meta:
-                logger.info(f"Cache MISS for message_id: {message_id}. Fetching from Telegram.")
-                chat_id = bot.stream_channel_id or bot.owner_db_channel_id
-                if not chat_id:
-                    raise ValueError("Streaming channels not configured.")
-                
-                message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
+        file_size = file_id.file_size
+        range_header = request.headers.get("Range", 0)
 
-                if not message or not message.media:
-                    raise FileIdInvalid(f"Message {message_id} not found or has no media.")
-                
-                media = getattr(message, message.media.value)
-                media_meta = {
-                    "message_object": message,
-                    "file_name": getattr(media, "file_name", "unknown.dat"),
-                    "file_size": int(getattr(media, "file_size", 0)),
-                    "mime_type": getattr(media, "mime_type", "application/octet-stream")
-                }
-                bot.media_cache[message_id] = media_meta
-            else:
-                logger.info(f"Cache HIT for message_id: {message_id}. Using memory cache.")
-
-        message = media_meta["message_object"]
-        file_name = media_meta["file_name"]
-        file_size = media_meta["file_size"]
-        mime_type = media_meta["mime_type"]
-
-        # ================================================================= #
-        # VVVVVV YAHAN PAR HAI ASLI JAADU - RANGE REQUEST HANDLING VVVVVV #
-        # ================================================================= #
-
-        range_header = request.headers.get("Range")
+        headers = {
+            "Content-Type": file_id.mime_type,
+            "Content-Disposition": f'{disposition}; filename="{file_id.file_name}"',
+            "Accept-Ranges": "bytes",
+        }
+        
         if range_header:
-            from_bytes, until_bytes = 0, file_size - 1
-            try:
-                range_bytes = range_header.split("=")[1]
-                from_bytes = int(range_bytes.split("-")[0])
-                if len(range_bytes.split("-")) > 1 and range_bytes.split("-")[1]:
-                    until_bytes = int(range_bytes.split("-")[1])
-            except (ValueError, IndexError):
-                return web.Response(status=400, text="Invalid Range header.")
-
-            if (from_bytes >= file_size) or (until_bytes >= file_size):
+            from_bytes, until_bytes = range_header.replace("bytes=", "").split("-")
+            from_bytes = int(from_bytes)
+            until_bytes = int(until_bytes) if until_bytes else file_size - 1
+            
+            if (from_bytes > file_size) or (until_bytes >= file_size):
                 return web.Response(status=416)
-
-            chunk_size = until_bytes - from_bytes + 1
-            offset = from_bytes
-            status = 206  # Partial Content
-            headers = {
-                "Content-Type": mime_type,
-                "Content-Disposition": f'{disposition}; filename="{file_name}"',
-                "Content-Length": str(chunk_size),
-                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-                "Accept-Ranges": "bytes"
-            }
+            
+            # Telegram ke block size ke hisaab se offset ko align karein
+            chunk_size = 1024 * 1024
+            offset = from_bytes - (from_bytes % chunk_size)
+            first_part_cut = from_bytes - offset
+            last_part_cut = (until_bytes % chunk_size) + 1 if until_bytes % chunk_size != -1 else chunk_size
+            part_count = math.ceil((until_bytes - offset + 1) / chunk_size)
+            
+            body = streamer.yield_file(
+                file_id, offset, first_part_cut, last_part_cut, part_count, chunk_size
+            )
+            
+            headers["Content-Length"] = str(until_bytes - from_bytes + 1)
+            headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
+            status = 206
         else:
-            headers = {
-                "Content-Type": mime_type,
-                "Content-Disposition": f'{disposition}; filename="{file_name}"',
-                "Content-Length": str(file_size)
-            }
-            offset = 0
+            body = streamer.yield_file(file_id, 0, 0, file_size, 1, file_size)
+            headers["Content-Length"] = str(file_size)
             status = 200
-        
+
         response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
         
-        # Pyrogram ke stable stream_media ko calculated offset ke saath istemal karein
-        streamer = bot.stream_media(message, offset=offset)
-        
-        async for chunk in streamer:
+        async for chunk in body:
             try:
                 await response.write(chunk)
-                await asyncio.sleep(0) # Smooth pipeline ke liye
+                await asyncio.sleep(0)
             except (ConnectionError, asyncio.CancelledError):
                 logger.warning(f"Client disconnected for message {message_id}. Stopping stream.")
                 break
         
         return response
 
-    except (FileIdInvalid, ValueError) as e:
-        logger.error(f"File ID or configuration error for stream request: {e}")
-        return web.Response(status=404, text="File not found or link expired.")
+    except (FileIdError, ValueError) as e:
+        logger.warning(f"File ID or configuration error for stream request: {e}")
+        return web.Response(status=404, text=f"File not found or link expired: {e}")
     except Exception:
         logger.critical(f"FATAL: Unexpected error in stream/download handler for message_id={message_id_str}", exc_info=True)
         return web.Response(status=500, text="Internal Server Error")
