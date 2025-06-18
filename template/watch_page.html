@@ -101,12 +101,15 @@
     </footer>
     <script>
         const streamUrl = "{{ stream_url }}";
+        // --- FIX: Use the dedicated download URL ---
+        const downloadUrl = "{{ download_url }}"; 
         
         function downloadVideo() {
-            window.location.href = streamUrl;
+            window.location.href = downloadUrl; // Use the correct URL
         }
 
         function openExternalPlayer(player) {
+            // External players should use the direct stream link
             const httpUrl = streamUrl.replace(/^https?:\/\//, 'http://');
             let intentUrl;
             switch(player) {
