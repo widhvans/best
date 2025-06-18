@@ -1,4 +1,4 @@
-# server/stream_routes.py (The Final, Most Stable "Superfast Sequential Streamer")
+# server/stream_routes.py (The Final Stable Version)
 
 import logging
 import asyncio
@@ -12,7 +12,7 @@ routes = web.RouteTableDef()
 
 async def get_media_meta(message_id, bot):
     """
-    A central function to get file details from cache or fetch and cache them.
+    Ek central function jo file ki details ko cache se laata hai ya zaroorat padne par fetch karke cache karta hai.
     """
     async with bot.cache_lock:
         media_meta = bot.media_cache.get(message_id)
@@ -42,8 +42,7 @@ async def get_media_meta(message_id, bot):
 
 async def producer(bot, message_id):
     """
-    Dedicated downloader (Producer). It downloads the file and puts chunks into a queue.
-    This runs only once per file, no matter how many clients connect.
+    Dedicated downloader (Producer). File download karke queue mein daalta hai.
     """
     producer_info = bot.stream_producers[message_id]
     try:
@@ -56,9 +55,9 @@ async def producer(bot, message_id):
             
     except Exception as e:
         logger.error(f"Producer for message {message_id} failed: {e}", exc_info=True)
-        await producer_info['queue'].put(None) # Signal error to consumers
+        await producer_info['queue'].put(None)
     finally:
-        await producer_info['queue'].put(None) # Signal end of stream
+        await producer_info['queue'].put(None)
         logger.info(f"Producer for message {message_id} has finished.")
 
 
@@ -81,7 +80,9 @@ async def watch_handler(request: web.Request):
     try:
         message_id = int(request.match_info["message_id"])
         bot = request.app['bot']
+        
         html_content = await render_page(bot, message_id)
+        
         return web.Response(text=html_content, content_type='text/html')
     except Exception as e:
         logger.critical(f"Unexpected error in watch handler: {e}", exc_info=True)
@@ -89,10 +90,6 @@ async def watch_handler(request: web.Request):
 
 
 async def stream_or_download(request: web.Request, disposition: str):
-    """
-    Handles streaming using the stable Producer-Consumer model without range requests.
-    This provides maximum stability and throughput for bot accounts.
-    """
     bot = request.app['bot']
     message_id_str = request.match_info.get("message_id")
     try:
@@ -111,9 +108,6 @@ async def stream_or_download(request: web.Request, disposition: str):
         
         media_meta = await get_media_meta(message_id, bot)
         
-        # ================================================================= #
-        # VVVVVV RANGE REQUEST LOGIC HATA DIYA GAYA HAI - STABILITY KE LIYE VVVVVV #
-        # ================================================================= #
         headers = {
             "Content-Type": media_meta["mime_type"],
             "Content-Disposition": f'{disposition}; filename="{media_meta["file_name"]}"',
@@ -128,12 +122,12 @@ async def stream_or_download(request: web.Request, disposition: str):
         while True:
             chunk = await queue.get()
             
-            if chunk is None: # Download poora hua ya fail ho gaya
+            if chunk is None:
                 break
             
             try:
                 await response.write(chunk)
-                await asyncio.sleep(0) # Pipeline ko smooth rakhne ke liye
+                await asyncio.sleep(0)
             except (ConnectionError, asyncio.CancelledError):
                 logger.warning(f"Consumer for message {message_id} disconnected.")
                 break
