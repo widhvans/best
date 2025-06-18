@@ -1,4 +1,4 @@
-# bot.py (Full Updated Code)
+# bot.py (The Final Corrected Version)
 
 import logging
 import asyncio
@@ -48,6 +48,18 @@ class Bot(Client):
         self.file_queue = asyncio.Queue()
         self.open_batches = {}
         
+        # ================================================================= #
+        # VVVVVV YAHAN SABHI ZAROORI ATTRIBUTES ADD KIYE GAYE HAIN VVVVVV #
+        # ================================================================= #
+        # Metadata caching ke liye
+        self.media_cache = {}
+        self.cache_lock = asyncio.Lock()
+
+        # Producer-Consumer model ke liye
+        self.stream_locks = {}
+        self.stream_producers = {}
+        
+        # VPS config ke liye
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
 
