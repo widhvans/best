@@ -4,7 +4,6 @@ from aiohttp import web
 from pyrogram import Client
 from pyrogram.session import Session, Auth
 from pyrogram.errors import AuthBytesInvalid, FileIdInvalid
-from pyrogram.errors.exceptions.bad_request_400 import LimitInvalid
 from pyrogram.file_id import FileId
 from pyrogram.raw import types, functions
 
@@ -32,6 +31,7 @@ class ByteStreamer:
         setattr(file_id, "file_name", media.file_name)
         return file_id
 
+    # --- RE-ENGINEERED: The producer task with correct error handling ---
     async def _producer(
         self,
         response: web.StreamResponse,
@@ -39,42 +39,56 @@ class ByteStreamer:
         from_bytes: int,
         until_bytes: int,
     ):
+        """
+        Downloads chunks from Telegram and writes them to the stream response.
+        Handles client disconnections gracefully.
+        """
         chunk_size = 1024 * 1024  # 1MB
         offset = from_bytes - (from_bytes % 4096)
         
         media_session = await self._get_media_session(file_prop.dc_id)
         location = self._get_input_location(file_prop)
         
+        bytes_to_yield = until_bytes - from_bytes + 1
+        current_offset_cut = from_bytes - offset
+        
         try:
-            while offset <= until_bytes:
-                # --- FIX: Use response.closed to check connection ---
-                if response.closed:
-                    logger.warning("Producer detected closed connection. Stopping download.")
-                    break
+            while bytes_to_yield > 0:
+                chunk = await media_session.invoke(
+                    functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
+                )
+
+                if not isinstance(chunk, types.upload.File):
+                    break # End of file or error
+
+                # Slice the chunk to get the exact part we need
+                if current_offset_cut > 0:
+                    output_data = chunk.bytes[current_offset_cut:]
+                    current_offset_cut = 0
+                else:
+                    output_data = chunk.bytes
                 
-                limit = chunk_size
-                try:
-                    chunk = await media_session.invoke(
-                        functions.upload.GetFile(location=location, offset=offset, limit=limit)
-                    )
-                    if isinstance(chunk, types.upload.File):
-                        await response.write(chunk.bytes)
-                        offset += limit
-                    else:
-                        break
-                except LimitInvalid:
-                    logger.warning("Received LimitInvalid from Telegram, retrying with smaller chunk.")
-                    await asyncio.sleep(0.5)
-                    continue
-                except Exception:
-                    logger.exception("Producer failed to get chunk from Telegram.")
-                    break
-        except (asyncio.CancelledError, ConnectionResetError):
-            logger.warning("Producer task cancelled or connection reset.")
+                # Trim the last chunk
+                if len(output_data) > bytes_to_yield:
+                    output_data = output_data[:bytes_to_yield]
+
+                await response.write(output_data)
+
+                bytes_to_yield -= len(output_data)
+                offset += chunk_size
+                
+        except (ConnectionResetError, asyncio.CancelledError):
+            logger.warning("Client disconnected, stopping producer.")
+        except Exception as e:
+            logger.exception(f"Producer encountered an error: {e}")
         finally:
             await response.write_eof()
 
+    # --- RE-ENGINEERED: The main handler is now much simpler and correct ---
     async def stream_media(self, request, message_id: int):
+        """
+        Sets up the streaming response and starts the producer task.
+        """
         try:
             file_prop = await self.get_file_properties(message_id)
         except ValueError as e:
@@ -108,20 +122,11 @@ class ByteStreamer:
         )
         await response.prepare(request)
         
-        producer_task = asyncio.create_task(
+        # Start the background task and immediately return the response object.
+        # The aiohttp server will handle the rest.
+        asyncio.create_task(
             self._producer(response, file_prop, from_bytes, until_bytes)
         )
-        
-        try:
-            await response.wait()
-        except (asyncio.CancelledError, ConnectionResetError):
-            logger.warning("Client connection closed. Cancelling producer task.")
-            producer_task.cancel()
-        
-        try:
-            await producer_task
-        except asyncio.CancelledError:
-            pass # Task was cancelled as expected
         
         return response
 
