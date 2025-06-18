@@ -93,6 +93,8 @@
         <div class="buttons-grid">
             <button onclick="openExternalPlayer('vlc')"><i class="fas fa-play"></i> Watch in VLC</button>
             <button onclick="openExternalPlayer('mx')"><i class="fas fa-play"></i> Watch in MX Player</button>
+            <button onclick="openExternalPlayer('playit')"><i class="fas fa-play"></i> Watch in Playit</button>
+            <button onclick="openExternalPlayer('xplayer')"><i class="fas fa-play"></i> Watch in X Player</button>
             <button onclick="downloadVideo()"><i class="fas fa-download"></i> Direct Download</button>
         </div>
     </div>
@@ -101,23 +103,30 @@
     </footer>
     <script>
         const streamUrl = "{{ stream_url }}";
-        // --- FIX: Use the dedicated download URL ---
         const downloadUrl = "{{ download_url }}"; 
-        
+
         function downloadVideo() {
-            window.location.href = downloadUrl; // Use the correct URL
+            window.location.href = downloadUrl;
         }
 
         function openExternalPlayer(player) {
-            // External players should use the direct stream link
             const httpUrl = streamUrl.replace(/^https?:\/\//, 'http://');
+            const urlWithoutScheme = httpUrl.substring(7);
+            const scheme = 'http';
             let intentUrl;
+
             switch(player) {
                 case 'vlc':
-                    intentUrl = `intent://${httpUrl.substring(7)}#Intent;scheme=http;package=org.videolan.vlc;end`;
+                    intentUrl = `intent://${urlWithoutScheme}#Intent;package=org.videolan.vlc;type=video/*;scheme=${scheme};action=android.intent.action.VIEW;end`;
                     break;
                 case 'mx':
-                    intentUrl = `intent://${httpUrl.substring(7)}#Intent;scheme=http;package=com.mxtech.videoplayer.ad;end`;
+                    intentUrl = `intent://${urlWithoutScheme}#Intent;package=com.mxtech.videoplayer.ad;type=video/*;scheme=${scheme};action=android.intent.action.VIEW;end`;
+                    break;
+                case 'playit':
+                    intentUrl = `intent://${urlWithoutScheme}#Intent;package=com.playit.videoplayer;type=video/*;scheme=${scheme};action=android.intent.action.VIEW;end`;
+                    break;
+                case 'xplayer':
+                    intentUrl = `intent://${urlWithoutScheme}#Intent;package=video.player.videoplayer;type=video/*;scheme=${scheme};action=android.intent.action.VIEW;end`;
                     break;
                 default:
                     return;
