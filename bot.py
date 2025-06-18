@@ -49,7 +49,6 @@ class Bot(Client):
             post_channels = user.get('post_channels', [])
             if not user or not post_channels: return
 
-            # --- Check channel validity before posting ---
             valid_post_channels = []
             for channel_id in post_channels:
                 if await notify_and_remove_invalid_channel(self, user_id, channel_id, "Post"):
@@ -85,7 +84,8 @@ class Bot(Client):
                 del self.open_batches[user_id]
 
     async def file_processor_worker(self):
-        logger.info("Fuzzy Matching Worker started.")
+        """Processes files from the queue with the new Smart Grouping logic."""
+        logger.info("Smart Grouping Worker started.")
         while True:
             try:
                 message, user_id = await self.file_queue.get()
@@ -98,25 +98,37 @@ class Bot(Client):
 
                 await save_file_data(user_id, message, copied_message)
                 
-                new_title, _ = clean_filename(getattr(copied_message, copied_message.media.value).file_name)
+                # Use the new Deep Analysis cleaning function
+                media = getattr(copied_message, copied_message.media.value)
+                new_title, _ = clean_filename(media.file_name)
                 if not new_title: continue
 
-                best_match_id, highest_similarity = None, 0.85
+                # --- NEW Intelligent Matching Logic ---
+                best_match_id = None
+                highest_similarity = 0
+                
                 self.open_batches.setdefault(user_id, {})
 
                 for batch_id, data in self.open_batches[user_id].items():
+                    # Use the new, smarter similarity calculation
                     similarity = calculate_title_similarity(new_title, data['title'])
                     if similarity > highest_similarity:
-                        highest_similarity, best_match_id = similarity, batch_id
+                        highest_similarity = similarity
+                        best_match_id = batch_id
+                
+                # A carefully tuned threshold for the new algorithm
+                SIMILARITY_THRESHOLD = 90
                 
                 loop = asyncio.get_event_loop()
-                if best_match_id:
+                if best_match_id and highest_similarity >= SIMILARITY_THRESHOLD:
+                    # Add to the best matching existing batch
                     batch = self.open_batches[user_id][best_match_id]
                     batch['messages'].append(copied_message)
                     if batch.get('timer'): batch['timer'].cancel()
                     batch['timer'] = loop.call_later(7, lambda: asyncio.create_task(self._finalize_batch(user_id, best_match_id)))
-                    logger.info(f"Added to batch '{batch['title']}' (Similarity: {highest_similarity:.2f})")
+                    logger.info(f"Added to batch '{batch['title']}' (Similarity: {highest_similarity})")
                 else:
+                    # No good match found, create a new batch
                     new_batch_id = copied_message.id
                     self.open_batches[user_id][new_batch_id] = {
                         'title': new_title, 'messages': [copied_message],
