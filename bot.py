@@ -1,6 +1,7 @@
+# bot.py (Full Updated Code)
+
 import logging
 import asyncio
-import socket
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -49,20 +50,11 @@ class Bot(Client):
         self.notification_flags = {}
         self.notification_timers = {}
         
-        # Metadata caching ke liye
         self.media_cache = {}
         self.cache_lock = asyncio.Lock()
-
-        # Producer-Consumer model ke liye
-        self.stream_locks = {}
-        self.stream_producers = {}
-
-        # ================================================================= #
-        # VVVVVV YAHAN PAR MISSING LINES WAPAS ADD KI GAYI HAIN VVVVVV #
-        # ================================================================= #
+        
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
-
 
     async def start_web_server(self):
         from server.stream_routes import routes as stream_routes
@@ -71,6 +63,7 @@ class Bot(Client):
         self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
         self.web_app.add_routes(stream_routes)
         
+        # DeprecationWarning fix: aiohttp ke modern AppRunner API ka istemal
         self.web_runner = web.AppRunner(self.web_app)
         await self.web_runner.setup()
         
@@ -78,8 +71,8 @@ class Bot(Client):
         
         await site.start()
         logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
-
-    # Baaki ke functions mein koi badlav nahi hai
+    
+    # Baaki ke functions mein koi badlav nahi hai...
     def _reset_notification_flag(self, channel_id):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
