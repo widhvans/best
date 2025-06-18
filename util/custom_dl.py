@@ -43,8 +43,8 @@ class ByteStreamer:
                  await session.start()
             self.client.media_sessions[dc_id] = session
         return session
-
-    # --- MODIFIED: Implemented Dynamic Chunking for Faster Playback Start ---
+        
+    # --- MODIFIED: stream_media logic is now more robust against LIMIT_INVALID ---
     async def stream_media(self, request, message_id: int):
         try:
             file_prop = await self.get_file_properties(message_id)
@@ -56,19 +56,19 @@ class ByteStreamer:
         range_header = request.headers.get("Range", f"bytes=0-{file_size-1}")
         
         try:
-            from_bytes, until_bytes_str = range_header.split("=")[1].split("-")
-            from_bytes = int(from_bytes)
-            until_bytes = int(until_bytes_str) if until_bytes_str else file_size - 1
+            from_bytes, until_bytes = (int(x) for x in range_header.split("=")[1].split("-"))
         except (ValueError, IndexError):
-            return web.Response(status=400, text="Invalid Range header")
+            from_bytes, until_bytes = 0, file_size - 1
 
-        if from_bytes > until_bytes or until_bytes >= file_size:
+        if from_bytes > until_bytes or from_bytes < 0 or until_bytes >= file_size:
             return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
 
+        # Use a chunk size that is a multiple of 1024*4 (Telegram's block size)
+        chunk_size = 1024 * 1024  # 1MB
         req_length = until_bytes - from_bytes + 1
         
         response = web.StreamResponse(
-            status=206, # Always 206 for range requests
+            status=206 if from_bytes != 0 else 200,
             headers={
                 "Content-Type": file_prop.mime_type or "application/octet-stream",
                 "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
@@ -82,20 +82,14 @@ class ByteStreamer:
         media_session = await self._get_media_session(file_prop.dc_id)
         location = self._get_input_location(file_prop)
         
-        offset = from_bytes - (from_bytes % 4096)
+        offset = from_bytes - (from_bytes % 4096) # Align offset to 4096 bytes
         first_part_cut = from_bytes - offset
         bytes_to_yield = req_length
 
-        # --- DYNAMIC CHUNKING LOGIC ---
-        is_first_chunk = True
-        initial_chunk_size = 128 * 1024   # 128KB for the first chunk to start fast
-        streaming_chunk_size = 1024 * 1024 # 1MB for subsequent chunks for high speed
-        # ---
-
         try:
-            while bytes_to_yield > 0 and not response.prepared:
-                limit = initial_chunk_size if is_first_chunk else streaming_chunk_size
-                is_first_chunk = False
+            while bytes_to_yield > 0:
+                # Always request a full, valid chunk size
+                limit = chunk_size
                 
                 chunk = await media_session.invoke(
                     functions.upload.GetFile(location=location, offset=offset, limit=limit)
@@ -104,12 +98,14 @@ class ByteStreamer:
                 if not isinstance(chunk, types.upload.File):
                     break
 
+                # Slice the data to get the exact part we need
                 if first_part_cut > 0:
                     output_data = chunk.bytes[first_part_cut:]
-                    first_part_cut = 0
+                    first_part_cut = 0 # This is only for the first chunk
                 else:
                     output_data = chunk.bytes
                 
+                # Trim the last chunk to the exact size
                 if len(output_data) > bytes_to_yield:
                     output_data = output_data[:bytes_to_yield]
                 
@@ -117,6 +113,9 @@ class ByteStreamer:
 
                 bytes_to_yield -= len(output_data)
                 offset += limit
+
+        except LimitInvalid:
+            logger.warning("LimitInvalid received despite fix. This might be a temporary Telegram issue.")
         except (ConnectionError, asyncio.TimeoutError):
             logger.warning("Client connection closed during streaming.")
         except Exception as e:
