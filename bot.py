@@ -6,27 +6,13 @@ from pyromod import Client
 from aiohttp import web
 from config import Config
 from database.db import get_user, save_file_data, get_owner_db_channel
-from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel
+from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, get_title_key
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 logging.getLogger("pyromod").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
-
-def are_titles_related(words1: set, words2: set):
-    """
-    A more advanced check to see if two titles are related based on common words.
-    """
-    if not words1 or not words2:
-        return False
-    
-    common_words = words1.intersection(words2)
-    # If titles are short, one common word is enough. Otherwise, require at least two.
-    # This helps group single-word titles like "Jodi" while being stricter for longer titles.
-    if len(words1) <= 2 or len(words2) <= 2:
-        return len(common_words) >= 1
-    return len(common_words) >= 2
 
 # Web Server Handler
 async def handle_redirect(request):
@@ -51,14 +37,16 @@ class Bot(Client):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
-    async def _finalize_batch(self, user_id, batch_id):
+    # --- UPDATED: Batching logic now uses a title key instead of a display title ---
+    async def _finalize_batch(self, user_id, batch_key):
         notification_messages = []
         try:
-            if user_id not in self.open_batches or batch_id not in self.open_batches[user_id]: return
-            batch_data = self.open_batches[user_id].pop(batch_id)
+            if user_id not in self.open_batches or batch_key not in self.open_batches[user_id]: return
+            batch_data = self.open_batches[user_id].pop(batch_key)
             messages = batch_data['messages']
             if not messages: return
             
+            # Reconstruct a display title from the first message for notifications
             first_filename = getattr(messages[0], messages[0].media.value).file_name
             batch_display_title, _ = clean_filename(first_filename)
 
@@ -93,16 +81,16 @@ class Bot(Client):
                     if poster: await self.send_with_protection(self.send_photo, channel_id, poster, caption=caption, reply_markup=footer)
                     else: await self.send_with_protection(self.send_message, channel_id, caption, reply_markup=footer, disable_web_page_preview=True)
                     await asyncio.sleep(2)
-        except Exception as e: logger.exception(f"Error finalizing batch {batch_id}: {e}")
+        except Exception as e: logger.exception(f"Error finalizing batch {batch_key}: {e}")
         finally:
             for sent_msg in notification_messages:
                 await self.send_with_protection(sent_msg.delete)
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
 
-    # --- REWRITTEN: Worker now uses the advanced common words batching system ---
+    # --- REWRITTEN: Worker now uses the title key system ---
     async def file_processor_worker(self):
-        logger.info("Advanced Batching Worker started.")
+        logger.info("Fuzzy Matching Worker started.")
         while True:
             try:
                 message, user_id = await self.file_queue.get()
@@ -116,40 +104,30 @@ class Bot(Client):
                 await save_file_data(user_id, message, copied_message)
                 
                 filename = getattr(copied_message, copied_message.media.value).file_name
-                new_title, _ = clean_filename(filename)
-                if not new_title: continue
+                title_key = get_title_key(filename)
                 
-                new_title_words = set(new_title.lower().split())
+                if not title_key:
+                    logger.warning(f"Could not generate a title key for filename: {filename}")
+                    continue
+
                 self.open_batches.setdefault(user_id, {})
                 loop = asyncio.get_event_loop()
-                
-                best_match_id = None
-                # Find a suitable batch to join
-                for batch_id, data in self.open_batches[user_id].items():
-                    if are_titles_related(new_title_words, data['title_words']):
-                        best_match_id = batch_id
-                        break
 
-                if best_match_id:
-                    # Add to the existing batch
-                    batch = self.open_batches[user_id][best_match_id]
+                if title_key in self.open_batches[user_id]:
+                    # Add to existing batch
+                    batch = self.open_batches[user_id][title_key]
                     batch['messages'].append(copied_message)
-                    # Update the common words to be more precise
-                    batch['title_words'].intersection_update(new_title_words)
-                    
-                    if batch.get('timer'): batch['timer'].cancel()
-                    batch['timer'] = loop.call_later(7, lambda key=best_match_id: asyncio.create_task(self._finalize_batch(user_id, key)))
-                    logger.info(f"Added '{filename}' to existing batch ID {best_match_id}")
+                    if batch.get('timer'):
+                        batch['timer'].cancel()
+                    batch['timer'] = loop.call_later(7, lambda key=title_key: asyncio.create_task(self._finalize_batch(user_id, key)))
+                    logger.info(f"Added to batch with key '{title_key}'")
                 else:
                     # Create a new batch
-                    new_batch_id = copied_message.id
-                    self.open_batches[user_id][new_batch_id] = {
+                    self.open_batches[user_id][title_key] = {
                         'messages': [copied_message],
-                        'title_words': new_title_words,
-                        'timer': loop.call_later(7, lambda key=new_batch_id: asyncio.create_task(self._finalize_batch(user_id, key)))
+                        'timer': loop.call_later(7, lambda key=title_key: asyncio.create_task(self._finalize_batch(user_id, key)))
                     }
-                    logger.info(f"Created new batch for '{filename}' with ID {new_batch_id}")
-
+                    logger.info(f"Created new batch with key '{title_key}'")
             except Exception as e: 
                 logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
             finally: 
