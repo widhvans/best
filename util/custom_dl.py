@@ -29,7 +29,7 @@ class ByteStreamer:
     async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
         """
         Handles both streaming ('inline') and downloading ('attachment').
-        - If file is cached, serves it directly.
+        - If file is cached, serves it with range support.
         - If not, streams from Telegram while caching.
         """
         try:
@@ -43,20 +43,52 @@ class ByteStreamer:
 
             if os.path.exists(file_path):
                 logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk with disposition: {disposition}")
-                return web.FileResponse(
-                    file_path, 
-                    chunk_size=256*1024, 
-                    headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'}
-                )
+                file_size = os.path.getsize(file_path)
+                headers = {
+                    "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                    "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(file_size),
+                }
+
+                range_header = request.headers.get("Range")
+                if range_header:
+                    try:
+                        start, end = range_header.replace("bytes=", "").split("-")
+                        start = int(start) if start else 0
+                        end = int(end) if end else file_size - 1
+                        if start >= file_size or end >= file_size or start > end:
+                            raise web.HTTPRangeNotSatisfiable()
+                        headers.update({
+                            "Content-Range": f"bytes {start}-{end}/{file_size}",
+                            "Content-Length": str(end - start + 1),
+                        })
+                        response = web.StreamResponse(status=206, headers=headers)
+                        await response.prepare(request)
+                        async with aiofiles.open(file_path, "rb") as f:
+                            await f.seek(start)
+                            remaining = end - start + 1
+                            while remaining > 0:
+                                chunk_size = min(256*1024, remaining)
+                                chunk = await f.read(chunk_size)
+                                if not chunk:
+                                    break
+                                await response.write(chunk)
+                                remaining -= len(chunk)
+                        return response
+                    except ValueError:
+                        raise web.HTTPRangeNotSatisfiable()
+                else:
+                    return web.FileResponse(
+                        file_path,
+                        chunk_size=256*1024,
+                        headers=headers
+                    )
 
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
             async with lock:
                 if os.path.exists(file_path):
-                    return web.FileResponse(
-                        file_path,
-                        chunk_size=256*1024,
-                        headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'}
-                    )
+                    return await self.handle_stream_and_download(request, message_id, disposition)
 
                 logger.info(f"Cache MISS for message_id: {message_id}. Streaming and caching.")
                 
@@ -64,6 +96,7 @@ class ByteStreamer:
                     headers={
                         "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
                         "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                        "Accept-Ranges": "bytes",
                     }
                 )
                 try:
