@@ -12,14 +12,12 @@ logger = logging.getLogger(__name__)
 
 FILES_PER_POST = 20
 
-# --- UPGRADED: Channel accessibility check now handles all exceptions ---
 async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
     """
     Checks if a channel is accessible. If not, notifies the user and removes it from DB.
     Returns True if channel is valid, False otherwise.
     """
     try:
-        # A lightweight check to see if the bot is in the channel.
         await client.get_chat_member(channel_id, "me")
         return True
     except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
@@ -47,6 +45,26 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
         return False
 
+# --- NEW: Function to generate a consistent key for batching ---
+def get_title_key(filename: str, num_words: int = 3) -> str:
+    """
+    Generates a key from the first N significant words of a filename
+    to use for batching.
+    """
+    # First, get the cleaned title from the existing function
+    cleaned_title, _ = clean_filename(filename)
+    
+    # Split into words and take the first N
+    words = cleaned_title.split()
+    # For series like "S01E01", take more words to be specific
+    if any(re.match(r's\d+', word, re.I) for word in words):
+        num_words = 4
+
+    key_words = words[:num_words]
+    
+    # Return the key as a lowercase string
+    return " ".join(key_words).lower()
+
 
 def calculate_title_similarity(title1: str, title2: str) -> float:
     return fuzz.token_sort_ratio(title1, title2) / 100.0
@@ -72,6 +90,7 @@ async def create_post(client, user_id, messages):
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
     if not first_media_obj: return [] 
     primary_title, year = clean_filename(first_media_obj.file_name)
+    
     def similarity_sorter(msg):
         media_obj = getattr(msg, msg.media.value, None)
         if not media_obj: return (1.0, "")
@@ -109,25 +128,17 @@ async def create_post(client, user_id, messages):
         return posts
 
 async def get_main_menu(user_id):
-    """
-    Generates the main settings menu text and keyboard with the new layout.
-    Returns a tuple: (menu_text, keyboard_markup)
-    """
     user_settings = await get_user(user_id)
     if not user_settings: 
         return "Could not find your settings.", InlineKeyboardMarkup([])
-
     menu_text = "⚙️ **Bot Settings**\n\nChoose an option below to configure the bot."
-
     shortener_text = "⚙️ Shortener Settings" if user_settings.get('shortener_url') else "🔗 Set Shortener"
-    
     if user_settings.get('fsub_channel'):
         fsub_text = "⚙️ Manage FSub"
         fsub_callback = "fsub_menu"
     else:
         fsub_text = "📢 Set FSub"
         fsub_callback = "set_fsub"
-
     buttons = [
         [InlineKeyboardButton("🗂️ Manage Channels", callback_data="manage_channels_menu")],
         [InlineKeyboardButton(shortener_text, callback_data="shortener_menu"), InlineKeyboardButton("🔄 Backup Links", callback_data="backup_links")],
@@ -139,9 +150,7 @@ async def get_main_menu(user_id):
     if user_id == Config.ADMIN_ID:
         buttons.append([InlineKeyboardButton("🔑 Set Owner DB", callback_data="set_owner_db")])
         buttons.append([InlineKeyboardButton("⚠️ Reset Files DB", callback_data="reset_db_prompt")])
-
     keyboard = InlineKeyboardMarkup(buttons)
-    
     return menu_text, keyboard
 
 def go_back_button(user_id):
