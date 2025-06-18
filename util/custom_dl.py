@@ -25,7 +25,6 @@ class ByteStreamer:
             raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
         return await self.client.get_messages(stream_channel, message_id)
 
-    # --- FINALIZED: Stream-and-Cache Architecture ---
     async def stream_media(self, request: web.Request, message_id: int) -> web.StreamResponse:
         """
         Handles streaming and caching.
@@ -49,7 +48,6 @@ class ByteStreamer:
             # --- Cache Miss: Stream from Telegram and cache to disk ---
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
             async with lock:
-                # Double-check if another request downloaded the file while we were waiting for the lock
                 if os.path.exists(file_path):
                     logger.info(f"Cache HIT for message_id: {message_id} (after lock). Serving from disk.")
                     return web.FileResponse(file_path, chunk_size=256*1024)
@@ -67,20 +65,18 @@ class ByteStreamer:
                 temp_file_path = file_path + ".temp"
                 
                 try:
-                    # Use aiofiles for asynchronous file writing
                     async with aiofiles.open(temp_file_path, "wb") as cache_file:
-                        # Use the reliable high-level iter_download
-                        async for chunk in self.client.iter_download(message):
+                        # --- THE CRITICAL FIX IS HERE ---
+                        # Use the high-level, reliable stream_media method
+                        async for chunk in self.client.stream_media(message):
                             await response.write(chunk)
                             await cache_file.write(chunk)
                     
-                    # Rename the temp file to the final name on successful completion
                     os.rename(temp_file_path, file_path)
                     logger.info(f"Caching complete for message_id: {message_id}")
 
                 except (ConnectionResetError, asyncio.CancelledError):
                     logger.warning(f"Client disconnected during initial stream/cache for message_id: {message_id}.")
-                    # Clean up incomplete temp file
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                 except Exception as e:
