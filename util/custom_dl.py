@@ -31,7 +31,7 @@ class ByteStreamer:
         setattr(file_id, "file_name", media.file_name)
         return file_id
 
-    # --- RE-ENGINEERED: The producer task with correct error handling ---
+    # --- FINALIZED: Producer with correct error handling and loop breaks ---
     async def _producer(
         self,
         response: web.StreamResponse,
@@ -39,11 +39,7 @@ class ByteStreamer:
         from_bytes: int,
         until_bytes: int,
     ):
-        """
-        Downloads chunks from Telegram and writes them to the stream response.
-        Handles client disconnections gracefully.
-        """
-        chunk_size = 1024 * 1024  # 1MB
+        chunk_size = 1024 * 1024
         offset = from_bytes - (from_bytes % 4096)
         
         media_session = await self._get_media_session(file_prop.dc_id)
@@ -54,41 +50,39 @@ class ByteStreamer:
         
         try:
             while bytes_to_yield > 0:
-                chunk = await media_session.invoke(
-                    functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
-                )
+                try:
+                    chunk = await media_session.invoke(
+                        functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
+                    )
+                    if not isinstance(chunk, types.upload.File):
+                        break
 
-                if not isinstance(chunk, types.upload.File):
-                    break # End of file or error
+                    # Slice the data to get the exact part we need
+                    if current_offset_cut > 0:
+                        output_data = chunk.bytes[current_offset_cut:]
+                        current_offset_cut = 0
+                    else:
+                        output_data = chunk.bytes
+                    
+                    if len(output_data) > bytes_to_yield:
+                        output_data = output_data[:bytes_to_yield]
 
-                # Slice the chunk to get the exact part we need
-                if current_offset_cut > 0:
-                    output_data = chunk.bytes[current_offset_cut:]
-                    current_offset_cut = 0
-                else:
-                    output_data = chunk.bytes
-                
-                # Trim the last chunk
-                if len(output_data) > bytes_to_yield:
-                    output_data = output_data[:bytes_to_yield]
+                    await response.write(output_data)
 
-                await response.write(output_data)
+                    bytes_to_yield -= len(output_data)
+                    offset += len(chunk.bytes)
 
-                bytes_to_yield -= len(output_data)
-                offset += chunk_size
-                
-        except (ConnectionResetError, asyncio.CancelledError):
-            logger.warning("Client disconnected, stopping producer.")
-        except Exception as e:
-            logger.exception(f"Producer encountered an error: {e}")
+                except (ConnectionResetError, asyncio.CancelledError):
+                    logger.warning("Client disconnected, stopping producer.")
+                    break
+                except Exception as e:
+                    logger.exception(f"Producer encountered an error: {e}")
+                    break
         finally:
             await response.write_eof()
 
-    # --- RE-ENGINEERED: The main handler is now much simpler and correct ---
+    # --- FINALIZED: Main handler with correct task management ---
     async def stream_media(self, request, message_id: int):
-        """
-        Sets up the streaming response and starts the producer task.
-        """
         try:
             file_prop = await self.get_file_properties(message_id)
         except ValueError as e:
@@ -122,8 +116,8 @@ class ByteStreamer:
         )
         await response.prepare(request)
         
-        # Start the background task and immediately return the response object.
-        # The aiohttp server will handle the rest.
+        # Start the background task and immediately return the response.
+        # The aiohttp server handles the connection from here.
         asyncio.create_task(
             self._producer(response, file_prop, from_bytes, until_bytes)
         )
