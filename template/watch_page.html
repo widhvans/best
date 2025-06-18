@@ -81,6 +81,12 @@
             color: #b0b0b0; font-size: 14px;
             width: 100%;
         }
+        .error-message {
+            color: #ff2e63;
+            text-align: center;
+            margin-top: 10px;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -90,10 +96,11 @@
     </div>
     <div class="container">
         <div class="player-container">
-            <video id="player" class="player" playsinline controls preload="metadata">
-                <source src="{{ stream_url }}" type="{{ mime_type }}">
+            <video id="player" class="player" playsinline controls preload="auto" autoplay>
+                <source src="{{ stream_url }}?t={{ timestamp }}" type="{{ mime_type }}">
                 Your browser does not support the video tag.
             </video>
+            <div id="error-message" class="error-message">Failed to load video. Please try again.</div>
         </div>
         <div class="buttons-grid">
             <button onclick="openExternalPlayer('vlc')"><i class="fas fa-play"></i> Watch in VLC</button>
@@ -105,7 +112,7 @@
         © 2025 Your Bot Name. All rights reserved.
     </footer>
     <script>
-        const streamUrl = "{{ stream_url }}";
+        const streamUrl = "{{ stream_url }}?t={{ timestamp }}";
         
         function openExternalPlayer(player) {
             const httpUrl = streamUrl.replace(/^https?:\/\//, 'http://');
@@ -124,9 +131,31 @@
         }
 
         const video = document.getElementById('player');
+        const errorMessage = document.getElementById('error-message');
+
         video.addEventListener('error', (e) => {
             console.error('Video playback error:', e);
-            video.load(); // Attempt to reload the video
+            errorMessage.style.display = 'block';
+            setTimeout(() => {
+                video.src = streamUrl; // Reload video source
+                video.load();
+                video.play().catch(e => console.error('Autoplay failed:', e));
+            }, 1000);
+        });
+
+        video.addEventListener('stalled', () => {
+            console.warn('Video stalled, attempting to resume...');
+            video.load();
+        });
+
+        video.addEventListener('waiting', () => {
+            console.warn('Video buffering, waiting...');
+        });
+
+        video.addEventListener('canplay', () => {
+            console.log('Video ready to play');
+            errorMessage.style.display = 'none';
+            video.play().catch(e => console.error('Autoplay failed:', e));
         });
     </script>
 </body>
