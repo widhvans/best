@@ -1,7 +1,5 @@
-# bot.py (Full Updated Code)
-
 import logging
-import asyncio # <-- Naya import
+import asyncio
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -31,7 +29,17 @@ async def handle_redirect(request):
 
 class Bot(Client):
     def __init__(self):
-        super().__init__("FinalStorageBot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN, plugins=dict(root="handlers"))
+        # ================================================================= #
+        # VVVVVV FIX 1: Bot ki concurrency badhane ke liye workers add kiye gaye VVVVVV #
+        # ================================================================= #
+        super().__init__(
+            "FinalStorageBot",
+            api_id=Config.API_ID,
+            api_hash=Config.API_HASH,
+            bot_token=Config.BOT_TOKEN,
+            plugins=dict(root="handlers"),
+            workers=100  # Increased workers for better performance
+        )
         self.me = None
         self.web_app = None
         self.web_runner = None
@@ -43,9 +51,6 @@ class Bot(Client):
         self.notification_flags = {}
         self.notification_timers = {}
         
-        # ================================================================= #
-        # VVVVVV YAHAN PAR NAYA CACHE SYSTEM ADD KIYA GAYA HAI VVVVVV #
-        # ================================================================= #
         self.media_cache = {}
         self.cache_lock = asyncio.Lock()
         
@@ -57,7 +62,6 @@ class Bot(Client):
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
     async def _finalize_batch(self, user_id, batch_key):
-        # This function remains unchanged
         notification_messages = []
         try:
             if user_id not in self.open_batches or batch_key not in self.open_batches[user_id]: return
@@ -98,7 +102,6 @@ class Bot(Client):
                 del self.open_batches[user_id]
 
     async def file_processor_worker(self):
-        # This function remains unchanged
         logger.info("File Processor Worker started.")
         while True:
             try:
@@ -156,7 +159,6 @@ class Bot(Client):
                 logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
 
     async def send_with_protection(self, coro, *args, **kwargs):
-        # This function remains unchanged
         while True:
             try:
                 return await coro(*args, **kwargs)
@@ -166,7 +168,6 @@ class Bot(Client):
                 logger.error(f"SEND_PROTECTION: An error occurred: {e}"); raise
 
     async def start_web_server(self):
-        # This function remains unchanged
         from server.stream_routes import routes as stream_routes
         self.web_app = web.Application()
         self.web_app['bot'] = self
@@ -174,12 +175,21 @@ class Bot(Client):
         self.web_app.add_routes(stream_routes)
         self.web_runner = web.AppRunner(self.web_app)
         await self.web_runner.setup()
-        site = web.TCPSite(self.web_runner, self.vps_ip, self.vps_port)
+        
+        # ================================================================= #
+        # VVVVVV FIX 2: Latency kam karne ke liye tcp_nodelay enable kiya gaya VVVVVV #
+        # ================================================================= #
+        site = web.TCPSite(
+            self.web_runner,
+            self.vps_ip,
+            self.vps_port,
+            tcp_nodelay=True  # Disables Nagle's algorithm for lower latency
+        )
+        
         await site.start()
-        logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
+        logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port} with performance optimizations.")
 
     async def start(self):
-        # This function remains unchanged
         await super().start()
         self.me = await self.get_me()
         self.owner_db_channel_id = await get_owner_db_channel()
@@ -197,7 +207,6 @@ class Bot(Client):
         logger.info(f"Bot @{self.me.username} started successfully.")
 
     async def stop(self, *args):
-        # This function remains unchanged
         logger.info("Stopping bot...")
         if self.web_runner: await self.web_runner.cleanup()
         await super().stop()
