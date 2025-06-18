@@ -1,5 +1,3 @@
-# bot.py (Full Updated Code with Stream Management)
-
 import logging
 import asyncio
 import socket
@@ -38,7 +36,7 @@ class Bot(Client):
             api_hash=Config.API_HASH,
             bot_token=Config.BOT_TOKEN,
             plugins=dict(root="handlers"),
-            workers=200 # Increased for better concurrency
+            workers=200
         )
         self.me = None
         self.web_app = None
@@ -51,11 +49,20 @@ class Bot(Client):
         self.notification_flags = {}
         self.notification_timers = {}
         
+        # Metadata caching ke liye
+        self.media_cache = {}
+        self.cache_lock = asyncio.Lock()
+
+        # Producer-Consumer model ke liye
+        self.stream_locks = {}
+        self.stream_producers = {}
+
         # ================================================================= #
-        # VVVVVV NAYA STREAMING WAREHOUSE SYSTEM (Producer-Consumer) VVVVVV #
+        # VVVVVV YAHAN PAR MISSING LINES WAPAS ADD KI GAYI HAIN VVVVVV #
         # ================================================================= #
-        self.stream_locks = {}      # Har file ke liye ek alag lock
-        self.stream_producers = {}  # Har file ke liye ek dedicated downloader task
+        self.vps_ip = Config.VPS_IP
+        self.vps_port = Config.VPS_PORT
+
 
     async def start_web_server(self):
         from server.stream_routes import routes as stream_routes
@@ -72,7 +79,7 @@ class Bot(Client):
         await site.start()
         logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
 
-    # Baaki ke functions (_reset_notification_flag, etc.) mein koi badlav nahi hai
+    # Baaki ke functions mein koi badlav nahi hai
     def _reset_notification_flag(self, channel_id):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
