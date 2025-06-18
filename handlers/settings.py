@@ -3,7 +3,7 @@ import base64
 import logging
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 from pyrogram.errors import MessageNotModified
 from database.db import (
     get_user, update_user, add_to_list, remove_from_list,
@@ -15,23 +15,47 @@ from utils.helpers import go_back_button, get_main_menu, create_post, clean_file
 logger = logging.getLogger(__name__)
 ACTIVE_BACKUP_TASKS = set()
 
-async def safe_edit_message(query, *args, **kwargs):
-    """A helper function to safely edit messages and handle common errors."""
+
+async def safe_edit_message(source, *args, **kwargs):
+    """
+    A helper function to safely edit messages and handle common errors.
+    It can now accept either a CallbackQuery or a Message object as the source.
+    """
     try:
+        # Determine if the source is a CallbackQuery or a Message
+        if isinstance(source, CallbackQuery):
+            message_to_edit = source.message
+        elif isinstance(source, Message):
+            message_to_edit = source
+        else:
+            # Log an error if the type is unexpected and exit
+            logger.error(f"safe_edit_message called with invalid type: {type(source)}")
+            return
+
+        # Set default parse mode if not provided
         if 'parse_mode' not in kwargs:
             kwargs['parse_mode'] = ParseMode.MARKDOWN
-        await query.message.edit_text(*args, **kwargs)
+        
+        # Edit the message
+        await message_to_edit.edit_text(*args, **kwargs)
+
     except MessageNotModified:
         try:
-            await query.answer()
-        except:
+            # If it's a query, we can answer it. If it's just a message, do nothing.
+            if isinstance(source, CallbackQuery):
+                await source.answer()
+        except Exception:
             pass
+            
     except Exception as e:
         logger.exception("Error while editing message")
         try:
-            await query.answer("An error occurred. Please try again.", show_alert=True)
-        except:
+            # If it's a query, we can answer with an alert to notify the user.
+            if isinstance(source, CallbackQuery):
+                await source.answer("An error occurred. Please try again.", show_alert=True)
+        except Exception:
             pass
+
 
 # --- Helper functions to build dynamic menus ---
 
