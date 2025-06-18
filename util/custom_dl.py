@@ -56,6 +56,13 @@ class ByteStreamer:
                     }
 
                     range_header = request.headers.get("Range")
+                    response = web.StreamResponse(headers=headers)
+                    try:
+                        await response.prepare(request)
+                    except (ClientConnectionResetError, ConnectionError):
+                        logger.warning(f"Client disconnected before response preparation for message_id: {message_id}")
+                        return response
+
                     if range_header:
                         try:
                             start, end = range_header.replace("bytes=", "").split("-")
@@ -81,9 +88,13 @@ class ByteStreamer:
                                     chunk = await f.read(chunk_size)
                                     if not chunk:
                                         break
-                                    await response.write(chunk)
-                                    remaining -= len(chunk)
-                            logger.info(f"Served range {start}-{end} for message_id: {message_id}")
+                                    try:
+                                        await response.write(chunk)
+                                        remaining -= len(chunk)
+                                    except (ClientConnectionResetError, ConnectionError):
+                                        logger.warning(f"Client disconnected during range streaming for message_id: {message_id}")
+                                        break
+                            logger.info(f"Served range {start}-{end} for message_id: {message_id}, size: {file_size}")
                             return response
                         except ValueError:
                             logger.warning(f"Invalid range header format for message_id: {message_id}, range: {range_header}")
@@ -92,15 +103,19 @@ class ByteStreamer:
                             })
                             return web.StreamResponse(status=416, headers=headers)
                     else:
-                        response = web.StreamResponse(headers=headers)
-                        await response.prepare(request)
                         async with aiofiles.open(file_path, "rb") as f:
+                            total_written = 0
                             while True:
                                 chunk = await f.read(256*1024)
                                 if not chunk:
                                     break
-                                await response.write(chunk)
-                        logger.info(f"Served full file for message_id: {message_id}, size: {file_size}")
+                                try:
+                                    await response.write(chunk)
+                                    total_written += len(chunk)
+                                except (ClientConnectionResetError, ConnectionError):
+                                    logger.warning(f"Client disconnected during full file streaming for message_id: {message_id}")
+                                    break
+                        logger.info(f"Served full file for message_id: {message_id}, size: {total_written}")
                         return response
 
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
@@ -127,10 +142,12 @@ class ByteStreamer:
                 
                 try:
                     async with aiofiles.open(temp_file_path, "wb") as cache_file:
+                        total_written = 0
                         async for chunk in self.client.stream_media(message):
                             try:
                                 await response.write(chunk)
                                 await cache_file.write(chunk)
+                                total_written += len(chunk)
                             except (ClientConnectionResetError, ConnectionResetError, ConnectionError):
                                 logger.warning(f"Client disconnected during streaming for message_id: {message_id}")
                                 break
@@ -141,7 +158,7 @@ class ByteStreamer:
                     if os.path.exists(temp_file_path):
                         if os.path.getsize(temp_file_path) > 0:
                             os.rename(temp_file_path, file_path)
-                            logger.info(f"Caching complete for message_id: {message_id}")
+                            logger.info(f"Caching complete for message_id: {message_id}, size: {total_written}")
                         else:
                             logger.warning(f"Empty temp file created for message_id: {message_id}")
                             os.remove(temp_file_path)
