@@ -26,10 +26,8 @@ def clean_filename(name: str):
         return "Untitled", "Untitled", None
 
     try:
-        # Step 1: Pre-process the name for better PTN parsing
         processed_name = name.replace('.', ' ').replace('_', ' ')
         
-        # Step 2: Parse with PTN
         parsed_info = PTN.parse(processed_name)
         base_title = parsed_info.get('title')
         year = str(parsed_info.get('year')) if parsed_info.get('year') else None
@@ -37,7 +35,6 @@ def clean_filename(name: str):
         if not base_title:
             raise ValueError("PTN did not find a title, triggering fallback.")
 
-        # Step 3: Format for TV Shows
         if 'season' in parsed_info and 'episode' in parsed_info:
             season = parsed_info.get('season')
             episode = parsed_info.get('episode')
@@ -47,37 +44,31 @@ def clean_filename(name: str):
                 full_title = f"{full_title} - {episode_name}"
             return base_title.strip(), full_title.strip(), year
 
-        # Step 4: Format for Movies
         return base_title.strip(), base_title.strip(), year
 
     except Exception:
-        # ================================================================= #
-        # VVVVVV NAYA, SUPER-SMART FALLBACK LOGIC VVVVVV #
-        # ================================================================= #
         logger.warning(f"PTN failed for '{name}'. Using the robust regex fallback.")
         
-        # Original filename se extension hatayein
         fallback_name = re.sub(r'\.[^.]*$', '', name)
-        # Separators (dots, underscores) ko space se replace karein
         fallback_name = fallback_name.replace('.', ' ').replace('_', ' ').strip()
-        # Saal (e.g., (2024)) ko hatayein
         fallback_name = re.sub(r'\s*\(\d{4}\)\s*', '', fallback_name).strip()
-        # Brackets (e.g., [1080p]) ko hatayein
         fallback_name = re.sub(r'\s*\[.*?\]\s*', '', fallback_name).strip()
 
-        # Saal ya quality tag ke pehle sign par naam ko split karein
         match = re.split(r'\b(19|20)\d{2}\b|720p|1080p|4k|webrip|web-dl|bluray|hdrip', fallback_name, maxsplit=1, flags=re.I)
         final_title = match[0].strip()
         
-        # Agar title khaali ho jaye to fallback_name istemal karein
         if not final_title:
             final_title = fallback_name
 
-        # Fallback mein, base aur full title ek hi honge aur saal None hoga
         return final_title, final_title, None
 
 
 async def create_post(client, user_id, messages):
+    """
+    Naye logic ke saath post banata hai:
+    - @promotions ko hatata hai.
+    - Button ko file ke naam ke neeche rakhta hai.
+    """
     user = await get_user(user_id)
     if not user: return []
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
@@ -112,8 +103,14 @@ async def create_post(client, user_id, messages):
             
             _, full_cleaned_label, _ = clean_filename(media.file_name)
             
-            parsed_info = PTN.parse(media.file_name)
+            # ================================================================= #
+            # VVVVVV YAHAN PAR AAPKE BATAYE ANUSAAR BADLAV KIYE GAYE HAIN VVVVVV #
+            # ================================================================= #
             
+            # Step 1: Label se @username/@channelname hatayein
+            label_no_mentions = re.sub(r'@\S+', '', full_cleaned_label).strip()
+
+            parsed_info = PTN.parse(media.file_name)
             extra_tags = [
                 parsed_info.get('resolution'),
                 parsed_info.get('quality'),
@@ -125,10 +122,14 @@ async def create_post(client, user_id, messages):
 
             link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
             
-            file_entry = f"📁 `{full_cleaned_label or media.file_name}` - [Click Here to Get File]({link})"
+            # Step 2: Naye layout ke saath file entry banayein
+            file_entry = f"📁 `{label_no_mentions or media.file_name}`"
             
             if filtered_text:
                 file_entry += f"\n   `{filtered_text}`"
+            
+            # Step 3: Button ko agli line mein "Click Here" naam se add karein
+            file_entry += f"\n   [Click Here]({link})"
             
             links.append(file_entry)
 
