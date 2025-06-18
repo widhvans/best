@@ -58,7 +58,11 @@ class ByteStreamer:
                         start = int(start) if start else 0
                         end = int(end) if end else file_size - 1
                         if start >= file_size or end >= file_size or start > end:
-                            raise web.HTTPRequestRangeNotSatisfiable()
+                            logger.warning(f"Invalid range request for message_id: {message_id}, start: {start}, end: {end}, file_size: {file_size}")
+                            headers.update({
+                                "Content-Range": f"bytes */{file_size}",
+                            })
+                            return web.StreamResponse(status=416, headers=headers)
                         headers.update({
                             "Content-Range": f"bytes {start}-{end}/{file_size}",
                             "Content-Length": str(end - start + 1),
@@ -77,7 +81,11 @@ class ByteStreamer:
                                 remaining -= len(chunk)
                         return response
                     except ValueError:
-                        raise web.HTTPRequestRangeNotSatisfiable()
+                        logger.warning(f"Invalid range header format for message_id: {message_id}, range: {range_header}")
+                        headers.update({
+                            "Content-Range": f"bytes */{file_size}",
+                        })
+                        return web.StreamResponse(status=416, headers=headers)
                 else:
                     return web.FileResponse(
                         file_path,
