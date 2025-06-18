@@ -1,27 +1,61 @@
 import traceback
 import logging
 from pyrogram import Client, filters, enums
-from pyrogram.errors import (
-    UserNotParticipant, 
-    MessageNotModified, 
-    ChatAdminRequired, 
-    ChannelInvalid, 
-    PeerIdInvalid,
-    ChannelPrivate  # Import the missing exception
-)
+from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import Config
-from database.db import (
-    add_user, get_file_by_unique_id, get_user, get_owner_db_channel,
-    is_user_verified, update_user, claim_verification_for_file
-)
+from database.db import add_user, get_file_by_unique_id, get_user, get_owner_db_channel, is_user_verified, update_user, claim_verification_for_file
 from utils.helpers import get_main_menu
 from features.shortener import get_shortlink
 
 logger = logging.getLogger(__name__)
 
+# --- NEW: Handler for files sent directly to the bot in PM ---
+@Client.on_message(filters.private & ~filters.command("start") & (filters.document | filters.video | filters.audio))
+async def handle_private_file(client, message):
+    """
+    Handles files sent in PM.
+    Replies with the same file with Download and Watch Online buttons.
+    """
+    # Check if admin has set the Owner DB channel, which is used for storing the file.
+    if not client.owner_db_channel_id:
+        return await message.reply_text("Bot is not yet configured by the admin. Please try again later.")
+        
+    processing_msg = await message.reply_text("⏳ Processing your file...", quote=True)
+    
+    try:
+        # Copy the file to the Owner DB to get a permanent message ID for streaming
+        copied_message = await message.copy(client.owner_db_channel_id)
+        
+        # Generate stream and download links using the new message ID
+        # Note: /stream/ is a direct download link, /watch/ is the player page.
+        download_link = f"http://{client.vps_ip}:{client.vps_port}/stream/{copied_message.id}"
+        watch_link = f"http://{client.vps_ip}:{client.vps_port}/watch/{copied_message.id}"
+        
+        # Create vertical buttons
+        buttons = [
+            [InlineKeyboardButton("📥 Download (İndir)", url=download_link)],
+            [InlineKeyboardButton("▶️ Watch Online (Çevrimiçi İzle)", url=watch_link)]
+        ]
+        keyboard = InlineKeyboardMarkup(buttons)
+        
+        # Reply to the user with the file and the buttons
+        await message.reply_cached_media(
+            file_id=message.media.file_id,
+            caption=f"`{message.media.file_name}`",
+            reply_markup=keyboard,
+            quote=True
+        )
+        await processing_msg.delete()
+
+    except Exception as e:
+        logger.exception("Error in handle_private_file")
+        await processing_msg.edit_text(f"An error occurred: {e}")
+# --- END NEW ---
+
+
 async def send_file(client, user_id, file_unique_id):
-    """Helper function to send the final file."""
+    # ... (This function remains unchanged)
     try:
         file_data = await get_file_by_unique_id(file_unique_id)
         if not file_data:
@@ -52,6 +86,7 @@ async def send_file(client, user_id, file_unique_id):
         logger.exception("Error in send_file function")
         await client.send_message(user_id, "Something went wrong while sending the file.")
 
+# ... (The rest of start.py remains the same) ...
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
     if message.from_user.is_bot: return
@@ -100,7 +135,6 @@ async def start_command(client, message):
 
 
 async def handle_public_file_request(client, message, user_id, payload):
-    """The final, robust handler for public links with the corrected FSub logic."""
     file_unique_id = payload.split("_", 1)[1]
     file_data = await get_file_by_unique_id(file_unique_id)
     if not file_data: return await message.reply_text("File not found or link has expired.")
@@ -123,13 +157,12 @@ async def handle_public_file_request(client, message, user_id, payload):
                 buttons = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)], [InlineKeyboardButton("🔄 Retry", callback_data=f"retry_{payload}")]]
                 return await message.reply_text("You must join the channel to continue.", reply_markup=InlineKeyboardMarkup(buttons))
 
-        # --- FINAL FIX: Added ChannelPrivate to the exceptions list ---
         except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
             logger.error(f"FSub channel error for owner {owner_id} (Channel: {fsub_channel}): {e}")
             
             await client.send_message(
                 chat_id=owner_id,
-                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is no longer accessible. The bot might have been kicked, the channel was deleted, or it lost permissions.\n\nIt has been automatically disabled. Please go to settings to set a new one."
+                text=f"⚠️ **FSub Channel Error**\n\nYour FSub channel (`{fsub_channel}`) is no longer accessible. It has been automatically disabled."
             )
             
             await update_user(owner_id, "fsub_channel", None)
