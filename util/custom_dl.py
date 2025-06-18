@@ -5,10 +5,10 @@ import aiofiles
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.types import Message
+from pyrogram.errors import FileReferenceExpired
 
 logger = logging.getLogger(__name__)
 
-# A lock to prevent multiple downloads of the same file at the same time
 DOWNLOAD_LOCKS = {}
 DOWNLOAD_DIR = "downloads"
 
@@ -17,7 +17,6 @@ class ByteStreamer:
         self.client: Client = client
 
     async def get_message(self, message_id: int) -> Message:
-        """Gets the message object from the appropriate channel."""
         stream_channel = self.client.stream_channel_id
         if not stream_channel:
             stream_channel = self.client.owner_db_channel_id
@@ -25,11 +24,12 @@ class ByteStreamer:
             raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
         return await self.client.get_messages(stream_channel, message_id)
 
-    async def stream_media(self, request: web.Request, message_id: int) -> web.StreamResponse:
+    # --- MODIFIED: This function now handles both streaming and downloading ---
+    async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
         """
-        Handles streaming and caching.
-        - If file is cached, serves it directly from disk (fast, seekable).
-        - If not cached, streams it from Telegram while simultaneously saving to disk.
+        Handles both streaming ('inline') and downloading ('attachment').
+        - If file is cached, serves it directly.
+        - If not, streams from Telegram while caching.
         """
         try:
             message = await self.get_message(message_id)
@@ -37,27 +37,32 @@ class ByteStreamer:
                 raise web.HTTPNotFound(text="File not found or has no media.")
             
             media = getattr(message, message.media.value)
-            file_name = getattr(media, "file_name", f"stream_{message_id}")
+            file_name = getattr(media, "file_name", f"download_{message_id}")
             file_path = os.path.join(DOWNLOAD_DIR, f"{message_id}_{file_name.replace('/', '_')}")
 
-            # --- Cache Hit: Serve the file directly if it exists ---
             if os.path.exists(file_path):
-                logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk.")
-                return web.FileResponse(file_path, chunk_size=256*1024)
+                logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk with disposition: {disposition}")
+                return web.FileResponse(
+                    file_path, 
+                    chunk_size=256*1024, 
+                    headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'}
+                )
 
-            # --- Cache Miss: Stream from Telegram and cache to disk ---
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
             async with lock:
                 if os.path.exists(file_path):
-                    logger.info(f"Cache HIT for message_id: {message_id} (after lock). Serving from disk.")
-                    return web.FileResponse(file_path, chunk_size=256*1024)
+                    return web.FileResponse(
+                        file_path,
+                        chunk_size=256*1024,
+                        headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'}
+                    )
 
-                logger.info(f"Cache MISS for message_id: {message_id}. Streaming from Telegram and caching.")
+                logger.info(f"Cache MISS for message_id: {message_id}. Streaming and caching.")
                 
                 response = web.StreamResponse(
                     headers={
                         "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
-                        "Content-Disposition": f'inline; filename="{file_name}"',
+                        "Content-Disposition": f'{disposition}; filename="{file_name}"',
                     }
                 )
                 await response.prepare(request)
@@ -66,8 +71,6 @@ class ByteStreamer:
                 
                 try:
                     async with aiofiles.open(temp_file_path, "wb") as cache_file:
-                        # --- THE CRITICAL FIX IS HERE ---
-                        # Use the high-level, reliable stream_media method
                         async for chunk in self.client.stream_media(message):
                             await response.write(chunk)
                             await cache_file.write(chunk)
@@ -87,5 +90,5 @@ class ByteStreamer:
                 return response
 
         except Exception as e:
-            logger.exception(f"A critical error occurred in stream_media for message_id {message_id}: {e}")
+            logger.exception(f"A critical error occurred in handle_stream_and_download for message_id {message_id}: {e}")
             raise web.HTTPInternalServerError(text="An internal server error occurred.")
