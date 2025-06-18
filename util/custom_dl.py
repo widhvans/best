@@ -3,7 +3,7 @@ import asyncio
 import logging
 from pyrogram import Client
 from pyrogram.session import Session, Auth
-from pyrogram.errors import AuthBytesInvalid
+from pyrogram.errors import AuthBytesInvalid, FileIdInvalid
 from pyrogram.file_id import FileId
 from pyrogram.raw import types, functions
 
@@ -13,12 +13,20 @@ class ByteStreamer:
     def __init__(self, client: Client):
         self.client: Client = client
 
+    # --- MODIFIED: get_file_properties now uses the Owner DB as a fallback ---
     async def get_file_properties(self, message_id: int):
-        """Fetches file properties from the stream channel."""
-        if not self.client.stream_channel_id:
-            raise ValueError("Stream channel is not configured.")
+        """Fetches file properties from the stream channel, with Owner DB as a fallback."""
         
-        message = await self.client.get_messages(self.client.stream_channel_id, message_id)
+        # Determine which channel to use for streaming
+        stream_channel = self.client.stream_channel_id
+        if not stream_channel:
+            stream_channel = self.client.owner_db_channel_id
+
+        # If neither is configured, then it's a critical error.
+        if not stream_channel:
+            raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
+        
+        message = await self.client.get_messages(stream_channel, message_id)
         if not message or not message.media:
             raise FileIdInvalid
 
@@ -31,6 +39,7 @@ class ByteStreamer:
         setattr(file_id, "file_name", media.file_name)
         
         return file_id
+    # --- END MODIFIED ---
 
     async def _get_media_session(self, dc_id: int):
         """Gets or creates a media session for the given DC."""
@@ -39,20 +48,22 @@ class ByteStreamer:
             if dc_id != await self.client.storage.dc_id():
                 session = Session(self.client, dc_id, await Auth(self.client, dc_id, await self.client.storage.test_mode()).create(), await self.client.storage.test_mode(), is_media=True)
                 await session.start()
-                
-                # Authorize the new session
                 exported_auth = await self.client.invoke(functions.auth.ExportAuthorization(dc_id=dc_id))
                 await session.invoke(functions.auth.ImportAuthorization(id=exported_auth.id, bytes=exported_auth.bytes))
             else:
                  session = Session(self.client, dc_id, await self.client.storage.auth_key(), await self.client.storage.test_mode(), is_media=True)
                  await session.start()
-                 
             self.client.media_sessions[dc_id] = session
         return session
 
     async def stream_media(self, request, message_id: int):
         """Stream the media content with support for range requests."""
-        file_prop = await self.get_file_properties(message_id)
+        try:
+            file_prop = await self.get_file_properties(message_id)
+        except ValueError as e:
+            logger.error(f"Configuration error during streaming: {e}")
+            return web.Response(status=500, text=str(e))
+            
         file_size = file_prop.file_size
 
         range_header = request.headers.get("Range")
@@ -79,16 +90,14 @@ class ByteStreamer:
                 "Content-Type": file_prop.mime_type or "application/octet-stream",
                 "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
                 "Content-Length": str(req_length),
-                "Content-Disposition": f'attachment; filename="{file_prop.file_name}"' if not file_prop.mime_type.startswith("video/") else "inline",
+                "Content-Disposition": f'attachment; filename="{file_prop.file_name}"' if not str(file_prop.mime_type).startswith("video/") else "inline",
                 "Accept-Ranges": "bytes"
             }
         )
         await response.prepare(request)
 
-        # Get the appropriate media session
         media_session = await self._get_media_session(file_prop.dc_id)
         location = self._get_input_location(file_prop)
-        
         offset = from_bytes - (from_bytes % chunk_size)
         first_part_cut = from_bytes - offset
         
@@ -97,24 +106,16 @@ class ByteStreamer:
                 limit = chunk_size
                 if offset + limit > until_bytes:
                     limit = until_bytes - offset + 1
-
-                chunk = await media_session.invoke(
-                    functions.upload.GetFile(location=location, offset=offset, limit=limit)
-                )
-
-                if not isinstance(chunk, types.upload.File):
-                    break
-                
+                chunk = await media_session.invoke(functions.upload.GetFile(location=location, offset=offset, limit=limit))
+                if not isinstance(chunk, types.upload.File): break
                 if first_part_cut:
                     await response.write(chunk.bytes[first_part_cut:])
                     first_part_cut = 0
                 else:
                     await response.write(chunk.bytes)
-                
                 offset += limit
-                
         except (ConnectionError, asyncio.TimeoutError):
-            pass # Client disconnected
+            pass
         except Exception as e:
             logger.error(f"Error while streaming: {e}", exc_info=True)
         finally:
@@ -123,14 +124,7 @@ class ByteStreamer:
             
     @staticmethod
     def _get_input_location(file_id: FileId):
-        """Converts a FileId to a raw InputFileLocation."""
         if file_id.file_type == 'photo':
-            return types.InputPhotoFileLocation(
-                id=file_id.media_id, access_hash=file_id.access_hash,
-                file_reference=file_id.file_reference, thumb_size=file_id.thumbnail_size
-            )
+            return types.InputPhotoFileLocation(id=file_id.media_id, access_hash=file_id.access_hash, file_reference=file_id.file_reference, thumb_size=file_id.thumbnail_size)
         else:
-            return types.InputDocumentFileLocation(
-                id=file_id.media_id, access_hash=file_id.access_hash,
-                file_reference=file_id.file_reference, thumb_size=file_id.thumbnail_size
-            )
+            return types.InputDocumentFileLocation(id=file_id.media_id, access_hash=file_id.access_hash, file_reference=file_id.file_reference, thumb_size=file_id.thumbnail_size)
