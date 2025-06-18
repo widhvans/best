@@ -1,6 +1,6 @@
 import logging
 import asyncio
-import socket  # <-- Naya zaroori import
+import socket  # Python ki core socket library
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -40,7 +40,8 @@ class Bot(Client):
         )
         self.me = None
         self.web_app = None
-        self.web_runner = None
+        # web_runner ko hata kar web_server add kiya gaya hai
+        self.web_server = None
         
         self.owner_db_channel_id = None
         self.stream_channel_id = None
@@ -55,6 +56,7 @@ class Bot(Client):
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
 
+    # Baaki ke functions (_reset_notification_flag, _finalize_batch, etc.) waise hi rahenge...
     def _reset_notification_flag(self, channel_id):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
@@ -171,27 +173,22 @@ class Bot(Client):
         self.web_app['bot'] = self
         self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
         self.web_app.add_routes(stream_routes)
-        self.web_runner = web.AppRunner(self.web_app)
-        await self.web_runner.setup()
         
         # ================================================================= #
-        # VVVVVV YAHAN PAR 'TCP_NODELAY' SET KARNE KA SAHI TAREEKA HAI VVVVVV #
+        # VVVVVV YAHAN PAR SERVER START KARNE KA NAYA, BULLETPROOF TAREEKA HAI VVVVVV #
         # ================================================================= #
         
-        # Step 1: Ek standard socket banayein
+        loop = asyncio.get_running_loop()
+        
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        
-        # Step 2: Socket par performance options set karein
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Latency kam karne ke liye
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Turant restart ke liye
-        
-        # Step 3: Socket ko address se bind karein
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.vps_ip, self.vps_port))
+        sock.listen()
         
-        # Step 4: Is custom socket par web server banayein
-        site = web.TCPSite(self.web_runner, sock=sock)
+        # Server ko self.web_server mein store karein taaki use baad mein band kar sakein
+        self.web_server = await loop.create_server(self.web_app.make_handler(), sock=sock)
         
-        await site.start()
         logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port} with performance optimizations.")
 
     async def start(self):
@@ -213,7 +210,10 @@ class Bot(Client):
 
     async def stop(self, *args):
         logger.info("Stopping bot...")
-        if self.web_runner: await self.web_runner.cleanup()
+        # Web server ko aaram se band karein
+        if self.web_server:
+            self.web_server.close()
+            await self.web_server.wait_closed()
         await super().stop()
         logger.info("Bot stopped.")
 
