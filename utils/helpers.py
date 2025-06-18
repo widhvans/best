@@ -1,6 +1,9 @@
+# utils/helpers.py (Full Updated Code)
+
 import re
 import base64
 import logging
+import PTN  # <-- Nayi powerful library import ki gayi
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
 from config import Config
@@ -11,6 +14,64 @@ from thefuzz import fuzz
 logger = logging.getLogger(__name__)
 
 FILES_PER_POST = 20 # Can be adjusted
+
+
+def clean_filename(name: str):
+    """
+    Cleans a filename using the parse-torrent-name (PTN) library for superior
+    title extraction, while maintaining the required (title, year) return format.
+    This new function improves batching, especially for TV shows.
+    """
+    if not name:
+        return "Untitled", None
+
+    try:
+        # PTN se behtareen parsing
+        parsed_info = PTN.parse(name)
+        
+        title = parsed_info.get('title', '')
+        year = str(parsed_info.get('year')) if parsed_info.get('year') else None
+
+        # TV Shows ke liye special formatting (e.g., "Breaking Bad S01E01")
+        if 'season' in parsed_info and 'episode' in parsed_info:
+            season = parsed_info.get('season')
+            episode = parsed_info.get('episode')
+            
+            final_title = f"{title} S{str(season).zfill(2)}E{str(episode).zfill(2)}"
+            
+            episode_name = parsed_info.get('episodeName')
+            if episode_name:
+                final_title = f"{final_title} - {episode_name}"
+            
+            return final_title.strip(), year
+
+        # Movies ke liye, sirf title aur saal
+        if title:
+            return title.strip(), year
+        
+        # Agar PTN title nahi nikal pata to purane tareeke par fallback karein
+        raise ValueError("PTN could not parse a title.")
+
+    except Exception:
+        # Agar PTN fail hota hai to purana regex wala tareeka istemal hoga
+        logger.warning(f"PTN failed for '{name}', using regex fallback.")
+        cleaned_name = re.sub(r'\.\w+$', '', name)
+        cleaned_name = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', cleaned_name)
+        cleaned_name = re.sub(r'[\._\-\|*&^%$#@!()]', ' ', cleaned_name)
+        cleaned_name = re.sub(r'[^A-Za-z0-9 ]', '', cleaned_name)
+        
+        year_match = re.search(r'\b(19|20)\d{2}\b', cleaned_name)
+        year_fallback = year_match.group(0) if year_match else None
+        if year_fallback: cleaned_name = cleaned_name.replace(year_fallback, '')
+        
+        tags = ['1080p', '720p', '480p', '2160p', '4k', 'HD', 'FHD', 'UHD', 'BluRay', 'WEBRip', 'WEB-DL', 'HDRip', 'x264', 'x265', 'HEVC', 'AAC', 'Dual Audio', 'Hindi', 'English', 'Esubs', 'Dubbed', r'S\d+E\d+', r'S\d+', r'Season\s?\d+', r'Part\s?\d+', r'E\d+', r'EP\d+', 'COMPLETE', 'WEB-SERIES']
+        for tag in tags:
+            cleaned_name = re.sub(r'\b' + tag + r'\b', '', cleaned_name, flags=re.I)
+        
+        final_title = re.sub(r'\s+', ' ', cleaned_name).strip()
+        
+        return (final_title, year_fallback) if final_title else (re.sub(r'\.\w+$', '', name).replace(".", " "), None)
+
 
 # --- create_post IS BACK! ---
 # This function is now used for creating text-based posts for public channels and the backup feature.
@@ -83,9 +144,12 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
         return False
 
-# ... (The rest of helpers.py remains the same as the previous version) ...
 def get_title_key(filename: str, num_words: int = 3) -> str:
     cleaned_title, _ = clean_filename(filename)
+    # For TV shows like "Title S01E01", the whole thing should be the key
+    if re.search(r'S\d+E\d+', cleaned_title, re.I):
+        return cleaned_title.rsplit(' ', 2)[0] # "Title S01E01 - Episode Name" -> "Title S01E01"
+    
     words = cleaned_title.split()
     if any(re.match(r's\d+', word, re.I) for word in words):
         num_words = 4
@@ -94,21 +158,6 @@ def get_title_key(filename: str, num_words: int = 3) -> str:
 
 def calculate_title_similarity(title1: str, title2: str) -> float:
     return fuzz.token_sort_ratio(title1, title2) / 100.0
-
-def clean_filename(name: str):
-    if not name: return "Untitled", None
-    cleaned_name = re.sub(r'\.\w+$', '', name)
-    cleaned_name = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', cleaned_name)
-    cleaned_name = re.sub(r'[\._\-\|*&^%$#@!()]', ' ', cleaned_name)
-    cleaned_name = re.sub(r'[^A-Za-z0-9 ]', '', cleaned_name)
-    year_match = re.search(r'\b(19|20)\d{2}\b', cleaned_name)
-    year = year_match.group(0) if year_match else None
-    if year: cleaned_name = cleaned_name.replace(year, '')
-    tags = ['1080p', '720p', '480p', '2160p', '4k', 'HD', 'FHD', 'UHD', 'BluRay', 'WEBRip', 'WEB-DL', 'HDRip', 'x264', 'x265', 'HEVC', 'AAC', 'Dual Audio', 'Hindi', 'English', 'Esubs', 'Dubbed', r'S\d+E\d+', r'S\d+', r'Season\s?\d+', r'Part\s?\d+', r'E\d+', r'EP\d+', 'COMPLETE', 'WEB-SERIES']
-    for tag in tags:
-        cleaned_name = re.sub(r'\b' + tag + r'\b', '', cleaned_name, flags=re.I)
-    final_title = re.sub(r'\s+', ' ', cleaned_name).strip()
-    return (final_title, year) if final_title else (re.sub(r'\.\w+$', '', name).replace(".", " "), None)
 
 async def get_main_menu(user_id):
     user_settings = await get_user(user_id)
