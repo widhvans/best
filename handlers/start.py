@@ -1,3 +1,5 @@
+# handlers/start.py (Full Updated Code)
+
 import logging
 from pyrogram import Client, filters, enums
 from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
@@ -9,7 +11,7 @@ from features.shortener import get_shortlink
 
 logger = logging.getLogger(__name__)
 
-# --- MODIFIED: English language and buttons ---
+
 @Client.on_message(filters.private & ~filters.command("start") & (filters.document | filters.video | filters.audio))
 async def handle_private_file(client, message):
     if not client.owner_db_channel_id:
@@ -17,14 +19,16 @@ async def handle_private_file(client, message):
     processing_msg = await message.reply_text("⏳ Processing your file...", quote=True)
     try:
         copied_message = await message.copy(client.owner_db_channel_id)
-        download_link = f"http://{client.vps_ip}:{client.vps_port}/stream/{copied_message.id}"
+        download_link = f"http://{client.vps_ip}:{client.vps_port}/download/{copied_message.id}"
         watch_link = f"http://{client.vps_ip}:{client.vps_port}/watch/{copied_message.id}"
         buttons = [
             [InlineKeyboardButton("📥 Download", url=download_link)],
             [InlineKeyboardButton("▶️ Watch Online", url=watch_link)]
         ]
         keyboard = InlineKeyboardMarkup(buttons)
-        await message.reply_cached_media(
+        # Use send_cached_media for faster response, especially with documents
+        await client.send_cached_media(
+            chat_id=message.chat.id,
             file_id=message.media.file_id,
             caption=f"`{message.media.file_name}`",
             reply_markup=keyboard,
@@ -46,7 +50,7 @@ async def send_file(client, user_id, file_unique_id):
             logger.error("Owner DB Channel not set, cannot send file.")
             return await client.send_message(user_id, "A configuration error occurred on the bot.")
 
-        download_link = f"http://{client.vps_ip}:{client.vps_port}/stream/{file_data['stream_id']}"
+        download_link = f"http://{client.vps_ip}:{client.vps_port}/download/{file_data['stream_id']}"
         watch_link = f"http://{client.vps_ip}:{client.vps_port}/watch/{file_data['stream_id']}"
         
         buttons = [
@@ -68,7 +72,6 @@ async def send_file(client, user_id, file_unique_id):
     except Exception:
         logger.exception("Error in send_file function")
         await client.send_message(user_id, "Something went wrong while sending the file.")
-# --- END MODIFIED ---
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
@@ -105,6 +108,9 @@ async def start_command(client, message):
             logger.exception("Error processing deep link in /start")
             await message.reply_text("Something went wrong.")
     else:
+        # ================================================================= #
+        # VVVVVV YAHAN PAR BUTTONS MEIN BADLAV KIYA GAYA HAI VVVVVV #
+        # ================================================================= #
         text = (
             f"Hello {message.from_user.mention}! 👋\n\n"
             "I am your personal **File Storage & Auto-Posting Bot**.\n\n"
@@ -113,7 +119,18 @@ async def start_command(client, message):
             "✓ Customize everything from captions to footers.\n\n"
             "Click the button below to begin!"
         )
-        await message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Let's Go 🚀", callback_data=f"go_back_{user_id}")]]))
+        
+        # Naya keyboard banaya gaya hai, jismein Tutorial button bhi hai
+        keyboard = InlineKeyboardMarkup(
+            [
+                # Pehli line mein "Let's Go" button
+                [InlineKeyboardButton("Let's Go 🚀", callback_data=f"go_back_{user_id}")],
+                # Doosri line mein "Tutorial" button
+                [InlineKeyboardButton("Tutorial 🎬", url=Config.TUTORIAL_URL)]
+            ]
+        )
+        
+        await message.reply_text(text, reply_markup=keyboard)
 
 
 async def handle_public_file_request(client, message, user_id, payload):
@@ -127,8 +144,10 @@ async def handle_public_file_request(client, message, user_id, payload):
     fsub_channel = owner_settings.get('fsub_channel')
     if fsub_channel:
         try:
+            # Check if bot is admin
             await client.get_chat_member(chat_id=fsub_channel, user_id="me")
             try:
+                # Check if user is member
                 await client.get_chat_member(chat_id=fsub_channel, user_id=user_id)
             except UserNotParticipant:
                 try: invite_link = await client.export_chat_invite_link(fsub_channel)
