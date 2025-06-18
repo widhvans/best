@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import aiofiles
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.types import Message
@@ -16,64 +17,78 @@ class ByteStreamer:
         self.client: Client = client
 
     async def get_message(self, message_id: int) -> Message:
-        """
-        Gets the message object from the appropriate channel.
-        This is a more direct approach than creating a FileId object.
-        """
+        """Gets the message object from the appropriate channel."""
         stream_channel = self.client.stream_channel_id
         if not stream_channel:
             stream_channel = self.client.owner_db_channel_id
         if not stream_channel:
             raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
-        
         return await self.client.get_messages(stream_channel, message_id)
 
-    # --- FINALIZED: The stable, download-and-serve architecture with the correct download call ---
+    # --- FINALIZED: Stream-and-Cache Architecture ---
     async def stream_media(self, request: web.Request, message_id: int) -> web.StreamResponse:
         """
-        This function now ensures a file is downloaded locally, then serves it.
-        This provides a stable and fast streaming experience.
+        Handles streaming and caching.
+        - If file is cached, serves it directly from disk (fast, seekable).
+        - If not cached, streams it from Telegram while simultaneously saving to disk.
         """
         try:
-            # Get the full message object
             message = await self.get_message(message_id)
             if not message or not message.media:
                 raise web.HTTPNotFound(text="File not found or has no media.")
-
+            
             media = getattr(message, message.media.value)
             file_name = getattr(media, "file_name", f"stream_{message_id}")
-            file_path = os.path.join(DOWNLOAD_DIR, f"{message_id}_{file_name}")
+            file_path = os.path.join(DOWNLOAD_DIR, f"{message_id}_{file_name.replace('/', '_')}")
 
-            # Create a lock for this specific file to prevent simultaneous downloads
+            # --- Cache Hit: Serve the file directly if it exists ---
+            if os.path.exists(file_path):
+                logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk.")
+                return web.FileResponse(file_path, chunk_size=256*1024)
+
+            # --- Cache Miss: Stream from Telegram and cache to disk ---
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
-            
             async with lock:
-                # Check if file exists after acquiring the lock
-                if not os.path.exists(file_path):
-                    logger.info(f"File not found locally. Starting download for message_id: {message_id}")
-                    temp_file_path = file_path + ".temp"
-                    
-                    try:
-                        # --- THE CRITICAL FIX IS HERE ---
-                        # Pass the entire message object to the downloader.
-                        await self.client.download_media(
-                            message=message,
-                            file_name=temp_file_path
-                        )
-                        # Rename the file to its final name after successful download
-                        os.rename(temp_file_path, file_path)
-                        logger.info(f"Download completed for message_id: {message_id}")
-                    except Exception as e:
-                        logger.exception(f"Failed to download file for message_id {message_id}: {e}")
-                        # Clean up temporary file on failure
-                        if os.path.exists(temp_file_path):
-                            os.remove(temp_file_path)
-                        raise web.HTTPInternalServerError(text="Failed to download the file from source.")
+                # Double-check if another request downloaded the file while we were waiting for the lock
+                if os.path.exists(file_path):
+                    logger.info(f"Cache HIT for message_id: {message_id} (after lock). Serving from disk.")
+                    return web.FileResponse(file_path, chunk_size=256*1024)
 
-            # Serve the local file using aiohttp's built-in, efficient FileResponse
-            # This handles Range requests, Content-Type, and everything else automatically.
-            logger.info(f"Serving file from local path: {file_path}")
-            return web.FileResponse(file_path, chunk_size=256*1024)
+                logger.info(f"Cache MISS for message_id: {message_id}. Streaming from Telegram and caching.")
+                
+                response = web.StreamResponse(
+                    headers={
+                        "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                        "Content-Disposition": f'inline; filename="{file_name}"',
+                    }
+                )
+                await response.prepare(request)
+
+                temp_file_path = file_path + ".temp"
+                
+                try:
+                    # Use aiofiles for asynchronous file writing
+                    async with aiofiles.open(temp_file_path, "wb") as cache_file:
+                        # Use the reliable high-level iter_download
+                        async for chunk in self.client.iter_download(message):
+                            await response.write(chunk)
+                            await cache_file.write(chunk)
+                    
+                    # Rename the temp file to the final name on successful completion
+                    os.rename(temp_file_path, file_path)
+                    logger.info(f"Caching complete for message_id: {message_id}")
+
+                except (ConnectionResetError, asyncio.CancelledError):
+                    logger.warning(f"Client disconnected during initial stream/cache for message_id: {message_id}.")
+                    # Clean up incomplete temp file
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+                except Exception as e:
+                    logger.exception(f"Error during stream/cache for message_id {message_id}: {e}")
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+                
+                return response
 
         except Exception as e:
             logger.exception(f"A critical error occurred in stream_media for message_id {message_id}: {e}")
