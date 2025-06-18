@@ -53,7 +53,6 @@
             overflow: hidden;
             box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
             margin-bottom: 30px;
-            position: relative;
         }
         .player { width: 100%; height: auto; display: block; }
         .buttons-grid {
@@ -61,7 +60,7 @@
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px; margin: 20px 0;
         }
-        button, a.button {
+        button {
             padding: 15px;
             background: linear-gradient(45deg, #00d4ff, #ff2e63);
             color: #ffffff; font-family: 'Poppins', sans-serif;
@@ -69,10 +68,8 @@
             border: none; border-radius: 10px; cursor: pointer;
             transition: transform 0.3s ease, box-shadow 0.3s ease;
             display: flex; align-items: center; justify-content: center; gap: 10px;
-            text-decoration: none;
-            box-sizing: border-box;
         }
-        button:hover, a.button:hover {
+        button:hover {
             transform: translateY(-3px);
             box-shadow: 0 5px 15px rgba(0, 212, 255, 0.5);
         }
@@ -81,26 +78,6 @@
             background: rgba(26, 26, 46, 0.9);
             color: #b0b0b0; font-size: 14px;
             width: 100%;
-        }
-        .error-message {
-            color: #ff2e63;
-            text-align: center;
-            margin-top: 10px;
-            display: none;
-            font-size: 16px;
-        }
-        .retry-button {
-            padding: 10px 20px;
-            background: #ff2e63;
-            color: #ffffff;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            margin-top: 10px;
-            font-size: 14px;
-        }
-        .retry-button:hover {
-            background: #e02a55;
         }
     </style>
 </head>
@@ -111,27 +88,24 @@
     </div>
     <div class="container">
         <div class="player-container">
-            <video id="player" class="player" playsinline controls preload="auto" muted>
-                <source src="{{ stream_url }}?t={{ timestamp }}" type="{{ mime_type }}">
-                Your browser does not support the video tag.
-            </video>
-            <div id="error-message" class="error-message">
-                Failed to load video. Please try again.
-                <button class="retry-button" onclick="retryVideo()">Retry</button>
-            </div>
+            <video id="player" class="player" src="{{ stream_url }}" playsinline controls preload="metadata"></video>
         </div>
         <div class="buttons-grid">
             <button onclick="openExternalPlayer('vlc')"><i class="fas fa-play"></i> Watch in VLC</button>
             <button onclick="openExternalPlayer('mx')"><i class="fas fa-play"></i> Watch in MX Player</button>
-            <a href="{{ download_url }}" class="button" download><i class="fas fa-download"></i> Direct Download</a>
+            <button onclick="downloadVideo()"><i class="fas fa-download"></i> Direct Download</button>
         </div>
     </div>
     <footer>
-        © 2025 Your Bot Name. All rights reserved.
+        &copy; 2025 Your Bot Name. All rights reserved.
     </footer>
     <script>
-        const streamUrl = "{{ stream_url }}?t={{ timestamp }}";
+        const streamUrl = "{{ stream_url }}";
         
+        function downloadVideo() {
+            window.location.href = streamUrl;
+        }
+
         function openExternalPlayer(player) {
             const httpUrl = streamUrl.replace(/^https?:\/\//, 'http://');
             let intentUrl;
@@ -147,57 +121,6 @@
             }
             window.location.href = intentUrl;
         }
-
-        const video = document.getElementById('player');
-        const errorMessage = document.getElementById('error-message');
-        let retryCount = 0;
-        const maxRetries = 3;
-
-        function retryVideo() {
-            if (retryCount >= maxRetries) {
-                errorMessage.textContent = 'Failed to load video after multiple attempts. Please try downloading or using an external player.';
-                return;
-            }
-            retryCount++;
-            console.log(`Retrying video load, attempt ${retryCount}`);
-            video.src = `${streamUrl}&retry=${retryCount}`;
-            video.load();
-            video.play().catch(e => console.error('Autoplay failed:', e));
-        }
-
-        video.addEventListener('error', (e) => {
-            console.error('Video playback error:', e);
-            errorMessage.style.display = 'block';
-            setTimeout(retryVideo, 1000);
-        });
-
-        video.addEventListener('stalled', () => {
-            console.warn('Video stalled, attempting to resume...');
-            setTimeout(retryVideo, 1000);
-        });
-
-        video.addEventListener('waiting', () => {
-            console.warn('Video buffering, waiting...');
-            errorMessage.style.display = 'block';
-            errorMessage.textContent = 'Buffering video, please wait...';
-        });
-
-        video.addEventListener('canplay', () => {
-            console.log('Video ready to play');
-            errorMessage.style.display = 'none';
-            retryCount = 0;
-            video.play().catch(e => console.error('Autoplay failed:', e));
-        });
-
-        video.addEventListener('loadedmetadata', () => {
-            console.log('Video metadata loaded, duration:', video.duration);
-        });
-
-        // Initial play attempt
-        video.play().catch(e => {
-            console.error('Initial autoplay failed:', e);
-            retryVideo();
-        });
     </script>
 </body>
 </html>
