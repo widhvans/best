@@ -53,6 +53,7 @@
             overflow: hidden;
             box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
             margin-bottom: 30px;
+            position: relative;
         }
         .player { width: 100%; height: auto; display: block; }
         .buttons-grid {
@@ -86,6 +87,20 @@
             text-align: center;
             margin-top: 10px;
             display: none;
+            font-size: 16px;
+        }
+        .retry-button {
+            padding: 10px 20px;
+            background: #ff2e63;
+            color: #ffffff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .retry-button:hover {
+            background: #e02a55;
         }
     </style>
 </head>
@@ -96,11 +111,14 @@
     </div>
     <div class="container">
         <div class="player-container">
-            <video id="player" class="player" playsinline controls preload="auto" autoplay>
+            <video id="player" class="player" playsinline controls preload="auto" muted>
                 <source src="{{ stream_url }}?t={{ timestamp }}" type="{{ mime_type }}">
                 Your browser does not support the video tag.
             </video>
-            <div id="error-message" class="error-message">Failed to load video. Please try again.</div>
+            <div id="error-message" class="error-message">
+                Failed to load video. Please try again.
+                <button class="retry-button" onclick="retryVideo()">Retry</button>
+            </div>
         </div>
         <div class="buttons-grid">
             <button onclick="openExternalPlayer('vlc')"><i class="fas fa-play"></i> Watch in VLC</button>
@@ -132,30 +150,49 @@
 
         const video = document.getElementById('player');
         const errorMessage = document.getElementById('error-message');
+        let retryCount = 0;
+        const maxRetries = 3;
+
+        function retryVideo() {
+            if (retryCount >= maxRetries) {
+                errorMessage.textContent = 'Failed to load video after multiple attempts. Please try downloading or using an external player.';
+                return;
+            }
+            retryCount++;
+            console.log(`Retrying video load, attempt ${retryCount}`);
+            video.src = `${streamUrl}&retry=${retryCount}`;
+            video.load();
+            video.play().catch(e => console.error('Autoplay failed:', e));
+        }
 
         video.addEventListener('error', (e) => {
             console.error('Video playback error:', e);
             errorMessage.style.display = 'block';
-            setTimeout(() => {
-                video.src = streamUrl; // Reload video source
-                video.load();
-                video.play().catch(e => console.error('Autoplay failed:', e));
-            }, 1000);
+            setTimeout(retryVideo, 2000);
         });
 
         video.addEventListener('stalled', () => {
             console.warn('Video stalled, attempting to resume...');
-            video.load();
+            setTimeout(retryVideo, 2000);
         });
 
         video.addEventListener('waiting', () => {
             console.warn('Video buffering, waiting...');
+            errorMessage.style.display = 'block';
+            errorMessage.textContent = 'Buffering video, please wait...';
         });
 
         video.addEventListener('canplay', () => {
             console.log('Video ready to play');
             errorMessage.style.display = 'none';
+            retryCount = 0;
             video.play().catch(e => console.error('Autoplay failed:', e));
+        });
+
+        // Initial play attempt
+        video.play().catch(e => {
+            console.error('Initial autoplay failed:', e);
+            retryVideo();
         });
     </script>
 </body>
