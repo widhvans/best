@@ -1,4 +1,3 @@
-import traceback
 import logging
 from pyrogram import Client, filters, enums
 from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
@@ -10,18 +9,19 @@ from features.shortener import get_shortlink
 
 logger = logging.getLogger(__name__)
 
+# --- MODIFIED: English language and buttons ---
 @Client.on_message(filters.private & ~filters.command("start") & (filters.document | filters.video | filters.audio))
 async def handle_private_file(client, message):
     if not client.owner_db_channel_id:
-        return await message.reply_text("Bot is not yet configured by the admin. Please try again later.")
+        return await message.reply_text("The bot is not yet configured by the admin. Please try again later.")
     processing_msg = await message.reply_text("⏳ Processing your file...", quote=True)
     try:
         copied_message = await message.copy(client.owner_db_channel_id)
         download_link = f"http://{client.vps_ip}:{client.vps_port}/stream/{copied_message.id}"
         watch_link = f"http://{client.vps_ip}:{client.vps_port}/watch/{copied_message.id}"
         buttons = [
-            [InlineKeyboardButton("📥 Download (İndir)", url=download_link)],
-            [InlineKeyboardButton("▶️ Watch Online (Çevrimiçi İzle)", url=watch_link)]
+            [InlineKeyboardButton("📥 Download", url=download_link)],
+            [InlineKeyboardButton("▶️ Watch Online", url=watch_link)]
         ]
         keyboard = InlineKeyboardMarkup(buttons)
         await message.reply_cached_media(
@@ -35,52 +35,40 @@ async def handle_private_file(client, message):
         logger.exception("Error in handle_private_file")
         await processing_msg.edit_text(f"An error occurred: {e}")
 
-# --- MODIFIED: send_file now sends the file with Download/Watch buttons ---
 async def send_file(client, user_id, file_unique_id):
-    """
-    This function is called at the end of the /get/... link process.
-    It now sends the file with Download and Watch Online buttons attached.
-    """
     try:
         file_data = await get_file_by_unique_id(file_unique_id)
         if not file_data:
             return await client.send_message(user_id, "Sorry, this file is no longer available.")
         
-        # The Owner DB channel is where the file is stored.
-        # It's also used for streaming if a separate stream channel isn't set.
         storage_channel_id = await get_owner_db_channel()
         if not storage_channel_id:
             logger.error("Owner DB Channel not set, cannot send file.")
             return await client.send_message(user_id, "A configuration error occurred on the bot.")
 
-        # Generate the stream and download links
         download_link = f"http://{client.vps_ip}:{client.vps_port}/stream/{file_data['stream_id']}"
         watch_link = f"http://{client.vps_ip}:{client.vps_port}/watch/{file_data['stream_id']}"
         
-        # Create the vertical buttons
         buttons = [
-            [InlineKeyboardButton("📥 Download (İndir)", url=download_link)],
-            [InlineKeyboardButton("▶️ Watch Online (Çevrimiçi İzle)", url=watch_link)]
+            [InlineKeyboardButton("📥 Download", url=download_link)],
+            [InlineKeyboardButton("▶️ Watch Online", url=watch_link)]
         ]
         keyboard = InlineKeyboardMarkup(buttons)
         
-        # Prepare the final caption
         file_name = file_data.get('file_name', 'N/A')
         caption = f"✅ **Here is your file!**\n\n`{file_name}`"
 
-        # Copy the file message from storage to the user with the new caption and buttons
         await client.copy_message(
             chat_id=user_id,
             from_chat_id=storage_channel_id,
             message_id=file_data['file_id'],
             caption=caption,
-            reply_markup=keyboard  # Attach the buttons
+            reply_markup=keyboard
         )
     except Exception:
         logger.exception("Error in send_file function")
         await client.send_message(user_id, "Something went wrong while sending the file.")
 # --- END MODIFIED ---
-
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
@@ -101,11 +89,9 @@ async def start_command(client, message):
                     
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
                         claim_successful = await claim_verification_for_file(file_unique_id, user_id, owner_id)
-                        
                         if claim_successful:
-                            await client.send_message(user_id, "✅ **Verification Successful!**\n\nThis link has now been used. For the next 12 hours, you will get direct links from this user's channels without extra steps.")
+                            await client.send_message(user_id, "✅ **Verification Successful!**\n\nYou can now get direct links from this user's channels for the next 12 hours.")
                 
-                # This is the final step, send the file with buttons
                 await send_file(client, user_id, file_unique_id)
 
             elif payload.startswith("ownerget_"):
