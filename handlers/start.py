@@ -1,4 +1,5 @@
 import logging
+import re  # <-- Naya zaroori import
 from pyrogram import Client, filters, enums
 from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -42,6 +43,10 @@ async def send_file(client, user_id, file_unique_id):
         if not file_data:
             return await client.send_message(user_id, "Sorry, this file is no longer available.")
         
+        # File ke owner ki settings nikalenge
+        owner_id = file_data['owner_id']
+        owner_settings = await get_user(owner_id)
+
         storage_channel_id = await get_owner_db_channel()
         if not storage_channel_id:
             logger.error("Owner DB Channel not set, cannot send file.")
@@ -56,19 +61,42 @@ async def send_file(client, user_id, file_unique_id):
         ]
         keyboard = InlineKeyboardMarkup(buttons)
         
-        file_name = file_data.get('file_name', 'N/A')
-        caption = f"✅ **Here is your file!**\n\n`{file_name}`"
+        # ================================================================= #
+        # VVVVVV YAHAN PAR HYPERLINK AUR PROMOTION FIX KIYA GAYA HAI VVVVVV #
+        # ================================================================= #
+
+        # Step 1: File ka original naam lein
+        file_name_raw = file_data.get('file_name', 'N/A')
+        
+        # Step 2: Naam se @username/@channelname jaise promotions hatayein
+        file_name_cleaned = re.sub(r'@\S+', '', file_name_raw).strip()
+        
+        filename_part = ""
+        filename_url = owner_settings.get("filename_url") if owner_settings else None
+
+        # Step 3: Check karein ki user ne custom URL set kiya hai ya nahi
+        if filename_url:
+            # Agar URL hai, to hyperlink banayein
+            filename_part = f"[{file_name_cleaned}]({filename_url})"
+        else:
+            # Agar URL nahi hai, to normal monospaced text banayein
+            filename_part = f"`{file_name_cleaned}`"
+
+        # Step 4: Naye filename_part ke saath final caption banayein
+        caption = f"✅ **Here is your file!**\n\n{filename_part}"
 
         await client.copy_message(
             chat_id=user_id,
             from_chat_id=storage_channel_id,
             message_id=file_data['file_id'],
-            caption=caption,
-            reply_markup=keyboard
+            caption=caption, # Yahan naya caption istemal hoga
+            reply_markup=keyboard,
+            parse_mode=enums.ParseMode.MARKDOWN # Hyperlink ke liye zaroori
         )
     except Exception:
         logger.exception("Error in send_file function")
         await client.send_message(user_id, "Something went wrong while sending the file.")
+
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
@@ -88,23 +116,12 @@ async def start_command(client, message):
                     owner_settings = await get_user(owner_id)
                     
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
-                        
-                        # ================================================================= #
-                        # VVVVVV YAHAN PAR Galti ko Theek Kiya Gaya Hai VVVVVV #
-                        # ================================================================= #
-                        
-                        # Step 1: Pehle check karein ki user pehle se verified tha ya nahi
                         was_already_verified = await is_user_verified(user_id, owner_id)
-
-                        # Step 2: Verification ke liye file ko claim karein
                         claim_successful = await claim_verification_for_file(file_unique_id, user_id, owner_id)
                         
-                        # Step 3: Success message sirf tabhi bhejein jab user pehle se verified NAHI tha, 
-                        # lekin ab claim successful ho gaya hai.
                         if claim_successful and not was_already_verified:
                             await client.send_message(user_id, "✅ **Verification Successful!**\n\nYou can now get direct links from this user's channels for the next 12 hours.")
                 
-                # File har haal mein bhejein
                 await send_file(client, user_id, file_unique_id)
 
             elif payload.startswith("ownerget_"):
