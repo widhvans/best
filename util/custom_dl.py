@@ -6,6 +6,7 @@ from aiohttp import web
 from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FileReferenceExpired
+from aiohttp.client_exceptions import ClientConnectionResetError
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,6 @@ class ByteStreamer:
             raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
         return await self.client.get_messages(stream_channel, message_id)
 
-    # --- MODIFIED: This function now handles both streaming and downloading ---
     async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
         """
         Handles both streaming ('inline') and downloading ('attachment').
@@ -65,18 +65,27 @@ class ByteStreamer:
                         "Content-Disposition": f'{disposition}; filename="{file_name}"',
                     }
                 )
-                await response.prepare(request)
+                try:
+                    await response.prepare(request)
+                except ClientConnectionResetError:
+                    logger.warning(f"Client disconnected before response preparation for message_id: {message_id}")
+                    return response
 
                 temp_file_path = file_path + ".temp"
                 
                 try:
                     async with aiofiles.open(temp_file_path, "wb") as cache_file:
                         async for chunk in self.client.stream_media(message):
-                            await response.write(chunk)
-                            await cache_file.write(chunk)
+                            try:
+                                await response.write(chunk)
+                                await cache_file.write(chunk)
+                            except ClientConnectionResetError:
+                                logger.warning(f"Client disconnected during streaming for message_id: {message_id}")
+                                break
                     
-                    os.rename(temp_file_path, file_path)
-                    logger.info(f"Caching complete for message_id: {message_id}")
+                    if os.path.exists(temp_file_path):
+                        os.rename(temp_file_path, file_path)
+                        logger.info(f"Caching complete for message_id: {message_id}")
 
                 except (ConnectionResetError, asyncio.CancelledError):
                     logger.warning(f"Client disconnected during initial stream/cache for message_id: {message_id}.")
