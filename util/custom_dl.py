@@ -3,7 +3,8 @@ import logging
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.session import Session, Auth
-from pyrogram.errors import AuthBytesInvalid, FileIdInvalid
+from pyrogram.errors import FileReferenceExpired, FileReferenceEmpty
+from pyrogram.errors.exceptions.bad_request_400 import LimitInvalid
 from pyrogram.file_id import FileId
 from pyrogram.raw import types, functions
 
@@ -22,7 +23,7 @@ class ByteStreamer:
         
         message = await self.client.get_messages(stream_channel, message_id)
         if not message or not message.media:
-            raise FileIdInvalid
+            raise FileReferenceEmpty
 
         media = getattr(message, message.media.value)
         file_id = FileId.decode(media.file_id)
@@ -52,7 +53,7 @@ class ByteStreamer:
         else:
             return types.InputDocumentFileLocation(id=file_id.media_id, access_hash=file_id.access_hash, file_reference=file_id.file_reference, thumb_size=file_id.thumbnail_size)
 
-    # --- FINALIZED: Stable, linear streaming logic ---
+    # --- FINALIZED: Resilient streaming with automatic retry on API errors ---
     async def stream_media(self, request: web.Request, message_id: int) -> web.StreamResponse:
         try:
             file_prop = await self.get_file_properties(message_id)
@@ -61,7 +62,7 @@ class ByteStreamer:
             raise web.HTTPInternalServerError(text=f"Failed to get file properties: {e}")
 
         file_size = file_prop.file_size
-        range_header = request.headers.get("Range", f"bytes=0-{file_size-1}")
+        range_header = request.headers.get("Range", f"bytes=0-{file_size-1 if file_size else 0}")
         
         try:
             from_bytes_str, until_bytes_str = range_header.split("=")[1].split("-")
@@ -87,14 +88,9 @@ class ByteStreamer:
         )
         await response.prepare(request)
 
-        chunk_size = 1024 * 1024  # 1MB
-        # Align the initial offset to a 4096-byte boundary
+        chunk_size = 512 * 1024 # 512KB chunk size
         offset = from_bytes - (from_bytes % 4096)
-        
-        # Calculate how many bytes to skip from the first downloaded chunk
         first_part_cut = from_bytes - offset
-        
-        # Calculate the total number of bytes we need to send
         bytes_to_send = req_length
 
         try:
@@ -102,32 +98,43 @@ class ByteStreamer:
             location = self._get_input_location(file_prop)
 
             while bytes_to_send > 0:
-                # Download a chunk from Telegram
-                chunk = await media_session.invoke(
-                    functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
-                )
-                
-                if not isinstance(chunk, types.upload.File) or not chunk.bytes:
-                    break # End of file from Telegram
+                retries = 0
+                chunk = None
+                # Retry loop to handle temporary API errors
+                while retries < 3:
+                    try:
+                        chunk = await media_session.invoke(
+                            functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
+                        )
+                        # If successful, break the retry loop
+                        break 
+                    except (FileReferenceExpired, LimitInvalid) as e:
+                        logger.warning(f"Download error: {e.__class__.__name__}. Refreshing file reference and retrying... (Attempt {retries + 1})")
+                        retries += 1
+                        await asyncio.sleep(retries * 2) # Exponential backoff
+                        # Refresh file properties to get a new file_reference
+                        file_prop = await self.get_file_properties(message_id)
+                        location = self._get_input_location(file_prop)
+                    except Exception:
+                        logger.exception("Unhandled error during chunk download.")
+                        break # Break on other unhandled errors
 
-                # Slice the downloaded chunk to get the exact part we need
+                if not isinstance(chunk, types.upload.File) or not chunk.bytes:
+                    logger.error("Failed to download chunk after retries or reached end of file.")
+                    break
+
                 if first_part_cut > 0:
                     output_data = chunk.bytes[first_part_cut:]
-                    first_part_cut = 0 # Only apply this to the first chunk
+                    first_part_cut = 0
                 else:
                     output_data = chunk.bytes
 
-                # Trim the last chunk to the exact size
                 if len(output_data) > bytes_to_send:
                     output_data = output_data[:bytes_to_send]
                 
-                # Write the data to the client and handle disconnection
                 await response.write(output_data)
                 
                 bytes_to_send -= len(output_data)
-                
-                # **THE CRITICAL FIX:** Always increment the offset by the chunk size requested,
-                # not the length of the data received.
                 offset += chunk_size
                 
         except (ConnectionResetError, asyncio.CancelledError):
