@@ -1,4 +1,4 @@
-# server/stream_routes.py (The Final Stable Version)
+# server/stream_routes.py (Full Updated Code)
 
 import logging
 import asyncio
@@ -28,60 +28,29 @@ async def watch_handler(request: web.Request):
     try:
         message_id = int(request.match_info["message_id"])
         bot = request.app['bot']
-        # render_template ab util folder mein nahi hai, isliye import path badalna hoga
-        from handlers.start import render_page
-        # Agar render_page start.py mein nahi hai, to uske sahi path ka istemal karein
-        # For now, assuming it might be moved or is accessible from a different helper
-        # Since we deleted utils, let's assume we might need to recreate render_page logic if it was there
-        # Let's check the user's files. The user never provided render_template.py. It was my own creation.
-        # I will inline a simplified version of it here.
-
-        # Let's get file properties here for the title
-        file_name = "File"
-        try:
-            chat_id = bot.stream_channel_id or bot.owner_db_channel_id
-            message = await bot.get_messages(chat_id, message_id)
-            if message and message.media:
-                media = getattr(message, message.media.value)
-                file_name = getattr(media, "file_name", "File")
-        except Exception:
-            pass
-
-        stream_url = f"http://{bot.vps_ip}:{bot.vps_port}/stream/{message_id}"
-        download_url = f"http://{bot.vps_ip}:{bot.vps_port}/download/{message_id}"
         
-        # Inlining the template rendering logic for simplicity
-        from jinja2 import Template
-        async with aiofiles.open('template/watch_page.html', 'r') as f:
-            template_content = await f.read()
-        template = Template(template_content)
+        # ================================================================= #
+        # VVVVVV YAHAN PAR IMPORT PATH THEEK KIYA GAYA HAI VVVVVV #
+        # ================================================================= #
+        from util.render_template import render_page
         
+        html_content = await render_page(bot, message_id)
+
         return web.Response(
-            text=template.render(
-                heading=f"Watch {file_name}",
-                file_name=file_name,
-                stream_url=stream_url,
-                download_url=download_url
-            ),
+            text=html_content,
             content_type='text/html'
         )
-
     except Exception as e:
         logger.critical(f"Unexpected error in watch handler: {e}", exc_info=True)
         return web.Response(text="Internal Server Error", status=500)
 
 
 async def stream_or_download(request: web.Request, disposition: str):
-    """
-    Handles streaming using the most stable method (stream_media) with performance tuning.
-    This version avoids all complex session handling and authorization errors.
-    """
     bot = request.app['bot']
     message_id_str = request.match_info.get("message_id")
     try:
         message_id = int(message_id_str)
         
-        # Metadata Caching ka istemal karein
         async with bot.cache_lock:
             media_meta = bot.media_cache.get(message_id)
             if not media_meta:
@@ -111,7 +80,6 @@ async def stream_or_download(request: web.Request, disposition: str):
         file_size = media_meta["file_size"]
         mime_type = media_meta["mime_type"]
 
-        # Hum ab range requests handle nahi kar rahe, seedha stream bhejenge
         headers = {
             "Content-Type": mime_type,
             "Content-Disposition": f'{disposition}; filename="{file_name}"',
@@ -121,10 +89,8 @@ async def stream_or_download(request: web.Request, disposition: str):
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         
-        # Pyrogram ka sabse stable stream method istemal karein
         streamer = bot.stream_media(message)
         
-        # Data pipeline ko smooth rakhne ke liye event loop ko yield karein
         async for chunk in streamer:
             try:
                 await response.write(chunk)
