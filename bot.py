@@ -6,7 +6,7 @@ from pyromod import Client
 from aiohttp import web
 from config import Config
 from database.db import get_user, save_file_data, get_owner_db_channel
-from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, get_title_key
+from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, generate_batch_key
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
@@ -37,7 +37,7 @@ class Bot(Client):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
-    # --- UPDATED: Batching logic now uses a title key instead of a display title ---
+    # --- UPDATED: Batching logic now passes the key to create_post for header generation ---
     async def _finalize_batch(self, user_id, batch_key):
         notification_messages = []
         try:
@@ -46,10 +46,6 @@ class Bot(Client):
             messages = batch_data['messages']
             if not messages: return
             
-            # Reconstruct a display title from the first message for notifications
-            first_filename = getattr(messages[0], messages[0].media.value).file_name
-            batch_display_title, _ = clean_filename(first_filename)
-
             user = await get_user(user_id)
             post_channels = user.get('post_channels', [])
             if not user or not post_channels: return
@@ -60,8 +56,9 @@ class Bot(Client):
                     valid_post_channels.append(channel_id)
             
             if not valid_post_channels:
-                logger.warning(f"User {user_id} has no valid post channels for batch '{batch_display_title}'.")
-                await self.send_message(user_id, f"⚠️ Could not post the batch for **{batch_display_title}** because you have no valid Post Channels configured. Please check your bot settings.")
+                display_title = " ".join(word.capitalize() for word in batch_key)
+                logger.warning(f"User {user_id} has no valid post channels for batch '{display_title}'.")
+                await self.send_message(user_id, f"⚠️ Could not post the batch for **{display_title}** because you have no valid Post Channels configured. Please check your bot settings.")
                 return
 
             for channel_id in valid_post_channels:
@@ -73,7 +70,8 @@ class Bot(Client):
                     if self.notification_timers.get(channel_id): self.notification_timers[channel_id].cancel()
                     self.notification_timers[channel_id] = asyncio.get_event_loop().call_later(60, self._reset_notification_flag, channel_id)
 
-            posts_to_send = await create_post(self, user_id, messages)
+            # Pass the batch_key to create_post so it can generate the correct header
+            posts_to_send = await create_post(self, user_id, messages, batch_key_words=batch_key)
             
             for channel_id in valid_post_channels:
                 for post in posts_to_send:
@@ -88,9 +86,9 @@ class Bot(Client):
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
 
-    # --- REWRITTEN: Worker now uses the title key system ---
+    # --- REWRITTEN: Worker now uses the new "Smart Key" batching system ---
     async def file_processor_worker(self):
-        logger.info("Fuzzy Matching Worker started.")
+        logger.info("Advanced Batching Worker started.")
         while True:
             try:
                 message, user_id = await self.file_queue.get()
@@ -104,30 +102,33 @@ class Bot(Client):
                 await save_file_data(user_id, message, copied_message)
                 
                 filename = getattr(copied_message, copied_message.media.value).file_name
-                title_key = get_title_key(filename)
+                batch_key = generate_batch_key(filename)
                 
-                if not title_key:
-                    logger.warning(f"Could not generate a title key for filename: {filename}")
+                if not batch_key:
+                    logger.warning(f"Could not generate a batch key for filename: {filename}")
+                    # Handle single files that don't produce a key
+                    await create_post(self, user_id, [copied_message])
                     continue
 
                 self.open_batches.setdefault(user_id, {})
                 loop = asyncio.get_event_loop()
 
-                if title_key in self.open_batches[user_id]:
+                if batch_key in self.open_batches[user_id]:
                     # Add to existing batch
-                    batch = self.open_batches[user_id][title_key]
+                    batch = self.open_batches[user_id][batch_key]
                     batch['messages'].append(copied_message)
                     if batch.get('timer'):
                         batch['timer'].cancel()
-                    batch['timer'] = loop.call_later(7, lambda key=title_key: asyncio.create_task(self._finalize_batch(user_id, key)))
-                    logger.info(f"Added to batch with key '{title_key}'")
+                    # Use a lambda to correctly capture the current batch_key for the timer
+                    batch['timer'] = loop.call_later(7, lambda key=batch_key: asyncio.create_task(self._finalize_batch(user_id, key)))
+                    logger.info(f"Added to batch with key '{batch_key}'")
                 else:
                     # Create a new batch
-                    self.open_batches[user_id][title_key] = {
+                    self.open_batches[user_id][batch_key] = {
                         'messages': [copied_message],
-                        'timer': loop.call_later(7, lambda key=title_key: asyncio.create_task(self._finalize_batch(user_id, key)))
+                        'timer': loop.call_later(7, lambda key=batch_key: asyncio.create_task(self._finalize_batch(user_id, key)))
                     }
-                    logger.info(f"Created new batch with key '{title_key}'")
+                    logger.info(f"Created new batch with key '{batch_key}'")
             except Exception as e: 
                 logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
             finally: 
