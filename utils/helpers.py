@@ -10,6 +10,52 @@ from thefuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
+FILES_PER_POST = 20 # Can be adjusted
+
+# --- create_post IS BACK! ---
+# This function is now used for creating text-based posts for public channels and the backup feature.
+async def create_post(client, user_id, messages):
+    user = await get_user(user_id)
+    if not user: return []
+    first_media_obj = getattr(messages[0], messages[0].media.value, None)
+    if not first_media_obj: return []
+    primary_title, year = clean_filename(first_media_obj.file_name)
+    
+    def similarity_sorter(msg):
+        media_obj = getattr(msg, msg.media.value, None)
+        if not media_obj: return (1.0, "")
+        title, _ = clean_filename(media_obj.file_name)
+        similarity_score = 1.0 - calculate_title_similarity(primary_title, title)
+        natural_key = natural_sort_key(media_obj.file_name)
+        return (similarity_score, natural_key)
+    messages.sort(key=similarity_sorter)
+    
+    base_caption_header = f"🎬 **{primary_title} {f'({year})' if year else ''}**"
+    post_poster = await get_poster(primary_title, year) if user.get('show_poster', True) else None
+    footer_buttons = user.get('footer_buttons', [])
+    footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
+    
+    posts, total = [], len(messages)
+    num_posts = (total + FILES_PER_POST - 1) // FILES_PER_POST
+    for i in range(num_posts):
+        chunk = messages[i*FILES_PER_POST:(i+1)*FILES_PER_POST]
+        header = f"{base_caption_header} (Part {i+1}/{num_posts})" if num_posts > 1 else base_caption_header
+        links = []
+        for m in chunk:
+            media = getattr(m, m.media.value, None)
+            if not media: continue
+            label, _ = clean_filename(media.file_name)
+            # Public posts use the /get/ link to drive traffic to the bot
+            link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
+            links.append(f"📁 `{label or media.file_name}` - [Click Here to Get File]({link})")
+        
+        final_caption = f"{header}\n\n" + "\n\n".join(links)
+        posts.append((post_poster, final_caption, footer_keyboard))
+        
+    return posts
+# --- END create_post ---
+
+
 async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
     try:
         await client.get_chat_member(channel_id, "me")
@@ -37,6 +83,7 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
         return False
 
+# ... (The rest of helpers.py remains the same as the previous version) ...
 def get_title_key(filename: str, num_words: int = 3) -> str:
     cleaned_title, _ = clean_filename(filename)
     words = cleaned_title.split()
