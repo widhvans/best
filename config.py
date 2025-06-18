@@ -33,4 +33,4 @@ class Config:
     # VVVVVV YAHAN PAR NAYA TUTORIAL LINK ADD KIYA GAYA HAI VVVVVV #
     # ================================================================= #
     # Yahan apna tutorial video ya channel ka link daalein
-    TUTORIAL_URL = os.environ.get("TUTORIAL_URL", "https://t.me/your_tutorial_link_here")
+    TUTORIAL_URL = os.environ.get("TUTORIAL_URL", "https://t.me/tutorial_really/2")
