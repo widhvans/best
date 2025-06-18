@@ -1,9 +1,13 @@
+# server/stream_routes.py (FULL REPLACEMENT)
+
 import logging
-import asyncio # <-- Naya import add karein
-import aiohttp # <-- Naya import add karein
+import asyncio
+import aiohttp
+import math
 from aiohttp import web
 from pyrogram.errors import FileIdInvalid
 from util.custom_dl import ByteStreamer
+from util.file_properties import FileIdError
 
 logger = logging.getLogger(__name__)
 routes = web.RouteTableDef()
@@ -18,7 +22,6 @@ async def root_route_handler(request):
 
 @routes.get("/favicon.ico", allow_head=True)
 async def favicon_handler(request):
-    """Handles browser requests for favicon.ico to keep logs clean."""
     return web.Response(status=204)
 
 @routes.get("/watch/{message_id:\\d+}", allow_head=True)
@@ -32,51 +35,73 @@ async def watch_handler(request: web.Request):
             content_type='text/html'
         )
     except Exception as e:
-        logger.critical(f"Unexpected error in watch handler for message_id={request.match_info.get('message_id')}: {e}", exc_info=True)
+        logger.critical(f"Unexpected error in watch handler: {e}", exc_info=True)
         return web.Response(text="Internal Server Error", status=500)
 
+async def stream_or_download(request: web.Request, disposition: str):
+    try:
+        message_id = int(request.match_info["message_id"])
+        bot = request.app['bot']
+        
+        streamer = ByteStreamer(bot)
+        file_id = await streamer.get_file_properties(message_id)
+        
+        file_size = file_id.file_size
+        range_header = request.headers.get("Range", 0)
 
-# ================================================================= #
-# VVVVVV YAHAN SE DONO HANDLERS MEIN BADLAV KIYA GAYA HAI VVVVVV #
-# ================================================================= #
+        headers = {
+            "Content-Type": file_id.mime_type,
+            "Content-Disposition": f'{disposition}; filename="{file_id.file_name}"',
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size)
+        }
+        
+        if range_header:
+            from_bytes, until_bytes = range_header.replace("bytes=", "").split("-")
+            from_bytes = int(from_bytes)
+            until_bytes = int(until_bytes) if until_bytes else file_size - 1
+        else:
+            from_bytes = 0
+            until_bytes = file_size - 1
+
+        if (until_bytes > file_size) or (from_bytes < 0):
+            return web.Response(status=416) # Range Not Satisfiable
+
+        chunk_size = 1024 * 1024 # 1MB
+        offset = from_bytes - (from_bytes % chunk_size)
+        first_part_cut = from_bytes - offset
+        last_part_cut = (until_bytes % chunk_size) + 1
+        part_count = math.ceil((until_bytes - offset) / chunk_size)
+        
+        body = streamer.yield_file(
+            file_id, offset, first_part_cut, last_part_cut, part_count, chunk_size
+        )
+        
+        response = web.StreamResponse(
+            status=206 if range_header else 200,
+            headers=headers
+        )
+        await response.prepare(request)
+        
+        async for chunk in body:
+            try:
+                await response.write(chunk)
+            except (ConnectionError, asyncio.CancelledError):
+                logger.warning(f"Client disconnected for message_id {message_id}. Stream stopped.")
+                break # Stop sending data if client disconnects
+        
+        return response
+
+    except (FileIdInvalid, FileIdError, web.HTTPNotFound):
+        return web.Response(text="File not found or link has expired.", status=404)
+    except Exception:
+        logger.critical(f"FATAL: Unexpected error in stream/download handler", exc_info=True)
+        return web.Response(text="Internal Server Error", status=500)
 
 @routes.get("/stream/{message_id:\\d+}", allow_head=True)
 async def stream_handler(request: web.Request):
-    """Handles video playback requests with robust error handling."""
-    try:
-        message_id = int(request.match_info["message_id"])
-        bot = request.app['bot']
-        return await ByteStreamer(bot).handle_stream_and_download(request, message_id, "inline")
-        
-    except (FileIdInvalid, FileNotFoundError, web.HTTPNotFound):
-        return web.Response(text="File not found or link has expired.", status=404)
-        
-    except (ConnectionError, asyncio.CancelledError, aiohttp.ClientError) as e:
-        logger.warning(f"Stream connection issue for message_id {request.match_info.get('message_id')}: {type(e).__name__}. Client likely disconnected.")
-        return web.Response(status=200) # Gracefully close the connection
-        
-    except Exception:
-        message_id = request.match_info.get('message_id')
-        logger.critical(f"FATAL: Unexpected error in stream handler for message_id={message_id}", exc_info=True)
-        return web.Response(text="Internal Server Error", status=500)
-
+    return await stream_or_download(request, "inline")
 
 @routes.get("/download/{message_id:\\d+}", allow_head=True)
 async def download_handler(request: web.Request):
-    """Handles direct download requests with robust error handling."""
-    try:
-        message_id = int(request.match_info["message_id"])
-        bot = request.app['bot']
-        return await ByteStreamer(bot).handle_stream_and_download(request, message_id, "attachment")
-
-    except (FileIdInvalid, FileNotFoundError, web.HTTPNotFound):
-        return web.Response(text="File not found or link has expired.", status=404)
-        
-    except (ConnectionError, asyncio.CancelledError, aiohttp.ClientError) as e:
-        logger.warning(f"Download connection issue for message_id {request.match_info.get('message_id')}: {type(e).__name__}. Client likely disconnected.")
-        return web.Response(status=200) # Gracefully close the connection
-
-    except Exception:
-        message_id = request.match_info.get('message_id')
-        logger.critical(f"FATAL: Unexpected error in download handler for message_id={message_id}", exc_info=True)
-        return web.Response(text="Internal Server Error", status=500)
+    return await stream_or_download(request, "attachment")
