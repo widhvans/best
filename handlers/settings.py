@@ -1,4 +1,3 @@
-
 import asyncio
 import base64
 import logging
@@ -20,29 +19,23 @@ ACTIVE_BACKUP_TASKS = set()
 async def safe_edit_message(source, *args, **kwargs):
     """
     A helper function to safely edit messages and handle common errors.
-    It can now accept either a CallbackQuery or a Message object as the source.
     """
     try:
-        # Determine if the source is a CallbackQuery or a Message
         if isinstance(source, CallbackQuery):
             message_to_edit = source.message
         elif isinstance(source, Message):
             message_to_edit = source
         else:
-            # Log an error if the type is unexpected and exit
             logger.error(f"safe_edit_message called with invalid type: {type(source)}")
             return
 
-        # Set default parse mode if not provided
         if 'parse_mode' not in kwargs:
             kwargs['parse_mode'] = ParseMode.MARKDOWN
         
-        # Edit the message
         await message_to_edit.edit_text(*args, **kwargs)
 
     except MessageNotModified:
         try:
-            # If it's a query, we can answer it. If it's just a message, do nothing.
             if isinstance(source, CallbackQuery):
                 await source.answer()
         except Exception:
@@ -51,7 +44,6 @@ async def safe_edit_message(source, *args, **kwargs):
     except Exception as e:
         logger.exception("Error while editing message")
         try:
-            # If it's a query, we can answer with an alert to notify the user.
             if isinstance(source, CallbackQuery):
                 await source.answer("An error occurred. Please try again.", show_alert=True)
         except Exception:
@@ -101,7 +93,6 @@ async def get_fsub_menu_parts(client, user_id):
     fsub_ch = user.get('fsub_channel')
     text = "**📢 FSub Settings**\n\n"
     if fsub_ch:
-        # We use the universal checker here too for consistency
         is_valid = await notify_and_remove_invalid_channel(client, user_id, fsub_ch, "FSub")
         if is_valid:
             try:
@@ -116,7 +107,30 @@ async def get_fsub_menu_parts(client, user_id):
         [go_back_button(user_id).inline_keyboard[0][0]]
     ])
 
+# ================================================================= #
+# VVVVVV YAHAN PAR NAYA MENU HANDLER ADD KIYA GAYA HAI VVVVVV #
+# ================================================================= #
+@Client.on_callback_query(filters.regex("^how_to_download_menu$"))
+async def how_to_download_menu_handler(client, query):
+    user_id = query.from_user.id
+    user = await get_user(user_id)
+    download_link = user.get("how_to_download_link")
+
+    text = "**❓ How to Download Link Settings**\n\n"
+    if download_link:
+        text += f"Your current 'How to Download' tutorial link is:\n`{download_link}`"
+    else:
+        text += "You have not set a 'How to Download' link yet."
+
+    buttons = [
+        [InlineKeyboardButton("✏️ Set/Change Link", callback_data="set_download")],
+        [go_back_button(user_id).inline_keyboard[0][0]]
+    ]
+    await safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+
+
 # --- Main Callback Handlers ---
+# (Baaki ke handlers waise hi hain)
 
 @Client.on_callback_query(filters.regex("^manage_channels_menu$"))
 async def manage_channels_submenu_handler(client, query):
@@ -289,11 +303,11 @@ async def start_backup_process(client, query):
         batches = []
         for doc in all_file_docs:
             if not doc.get('file_name'): continue
-            doc_title, _ = clean_filename(doc['file_name'])
+            doc_title, _, _ = clean_filename(doc['file_name'])
             if not doc_title: continue
             added_to_existing_batch = False
             for batch in batches:
-                batch_title, _ = clean_filename(batch[0]['file_name'])
+                batch_title, _, _ = clean_filename(batch[0]['file_name'])
                 if calculate_title_similarity(doc_title, batch_title) > 0.85:
                     batch.append(doc)
                     added_to_existing_batch = True
@@ -369,20 +383,17 @@ async def remove_footer_handler(client, query):
     await query.answer("Button removed!", show_alert=True)
     await manage_footer_handler(client, query)
 
-# --- UPDATED: Handler now checks channels when the menu is opened ---
 @Client.on_callback_query(filters.regex(r"manage_(post|db)_ch"))
 async def manage_channels_handler(client, query):
     user_id, ch_type = query.from_user.id, query.data.split("_")[1]
     ch_type_key, ch_type_name = f"{ch_type}_channels", "Post" if ch_type == "post" else "Database"
     
-    # Get a fresh copy of the channels after potentially being modified by the check
     user_data = await get_user(user_id)
     channels = user_data.get(ch_type_key, [])
     
     text = f"**Manage Your {ch_type_name} Channels**\n\n"
     buttons = []
     
-    # Create a list of valid channels first
     valid_channels = []
     if channels:
         for ch_id in channels:
@@ -396,7 +407,6 @@ async def manage_channels_handler(client, query):
                 chat = await client.get_chat(ch_id)
                 buttons.append([InlineKeyboardButton(f"❌ {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
             except:
-                # This case is unlikely now but good for safety
                 buttons.append([InlineKeyboardButton(f"❌ Unavailable ({ch_id})", callback_data=f"rm_{ch_type}_{ch_id}")])
     else:
         text += "You haven't added any channels yet."
@@ -460,8 +470,17 @@ async def set_other_links_handler(client, query):
     prompts = {"fsub": ("📢 **Set FSub**\n\nForward a message from your FSub channel.", "fsub_channel"), "download": ("❓ **Set 'How to Download'**\n\nSend your tutorial URL.", "how_to_download_link")}
     prompt_text, key = prompts[action]
     try:
-        prompt = await query.message.edit_text(prompt_text, reply_markup=go_back_button(user_id))
-        response = await client.listen(chat_id=user_id, timeout=300, filters=filters.forwarded if action == "fsub" else filters.text)
+        # For 'download', show the current link before asking for a new one
+        if action == "download":
+            user = await get_user(user_id)
+            current_link = user.get(key)
+            if current_link:
+                prompt_text += f"\n\n**Current Link:** `{current_link}`"
+
+        prompt = await query.message.edit_text(prompt_text, reply_markup=go_back_button(user_id), disable_web_page_preview=True)
+        
+        listen_filters = filters.forwarded if action == "fsub" else filters.text
+        response = await client.listen(chat_id=user_id, timeout=300, filters=listen_filters)
         
         value = None
         if action == "fsub":
