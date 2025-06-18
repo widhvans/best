@@ -58,7 +58,7 @@ class ByteStreamer:
                         start = int(start) if start else 0
                         end = int(end) if end else file_size - 1
                         if start >= file_size or end >= file_size or start > end:
-                            raise web.HTTPRangeNotSatisfiable()
+                            raise web.HTTPRequestRangeNotSatisfiable()
                         headers.update({
                             "Content-Range": f"bytes {start}-{end}/{file_size}",
                             "Content-Length": str(end - start + 1),
@@ -77,7 +77,7 @@ class ByteStreamer:
                                 remaining -= len(chunk)
                         return response
                     except ValueError:
-                        raise web.HTTPRangeNotSatisfiable()
+                        raise web.HTTPRequestRangeNotSatisfiable()
                 else:
                     return web.FileResponse(
                         file_path,
