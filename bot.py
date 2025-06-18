@@ -36,14 +36,12 @@ class Bot(Client):
         self.web_app = None
         self.web_runner = None
         
-        # --- MODIFIED: Add attributes from both bots ---
         self.owner_db_channel_id = None
         self.stream_channel_id = None
         self.file_queue = asyncio.Queue()
         self.open_batches = {}
         self.notification_flags = {}
         self.notification_timers = {}
-        # --- END MODIFIED ---
         
         # Add config values to instance for easy access in web handlers
         self.vps_ip = Config.VPS_IP
@@ -54,7 +52,6 @@ class Bot(Client):
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
     async def _finalize_batch(self, user_id, batch_key):
-        # ... (This function remains largely the same, but it will now create posts with stream buttons thanks to the helpers.py change) ...
         notification_messages = []
         try:
             if user_id not in self.open_batches or batch_key not in self.open_batches[user_id]: return
@@ -103,31 +100,36 @@ class Bot(Client):
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
 
-    # --- MODIFIED: file_processor_worker now copies to stream channel and saves stream_id ---
+    # --- MODIFIED: file_processor_worker is now more flexible ---
     async def file_processor_worker(self):
         logger.info("File Processor Worker started.")
         while True:
             try:
                 message, user_id = await self.file_queue.get()
                 
-                # Ensure both required channels are set by the admin
+                # Ensure Owner DB is set, it's mandatory.
                 if not self.owner_db_channel_id: self.owner_db_channel_id = await get_owner_db_channel()
-                if not self.stream_channel_id: self.stream_channel_id = await get_stream_channel()
-
                 if not self.owner_db_channel_id:
-                    logger.error("Owner DB Channel not set. File processing skipped."); continue
-                if not self.stream_channel_id:
-                    logger.error("Stream Channel not set. File processing skipped."); continue
+                    logger.error("Owner DB Channel is mandatory and not set. File processing skipped.")
+                    continue
+
+                # Ensure Stream Channel is loaded, but it's not mandatory.
+                if not self.stream_channel_id: self.stream_channel_id = await get_stream_channel()
                 
-                # 1. Copy to Owner DB for backup/get_links
+                # 1. Copy to the Owner DB. This is always required.
                 copied_message = await self.send_with_protection(message.copy, self.owner_db_channel_id)
                 if not copied_message: continue
 
-                # 2. Copy to Stream Channel for streaming
-                stream_message = await self.send_with_protection(message.copy, self.stream_channel_id)
-                if not stream_message: continue
+                # 2. Determine the stream message.
+                # If a separate stream channel is configured, copy the file there too.
+                if self.stream_channel_id and self.stream_channel_id != self.owner_db_channel_id:
+                    stream_message = await self.send_with_protection(message.copy, self.stream_channel_id)
+                    if not stream_message: continue
+                else:
+                    # Otherwise, use the same message from the Owner DB for streaming.
+                    stream_message = copied_message
 
-                # 3. Save both message IDs to the database
+                # 3. Save both message IDs to the database. They might be the same, which is fine.
                 await save_file_data(user_id, message, copied_message, stream_message)
                 
                 # The rest of the batching logic remains the same
@@ -166,15 +168,12 @@ class Bot(Client):
             except Exception as e:
                 logger.error(f"SEND_PROTECTION: An error occurred: {e}"); raise
 
-    # --- MODIFIED: start_web_server now includes all routes ---
     async def start_web_server(self):
-        """Starts a single web server for both redirect and stream routes."""
         from server.stream_routes import routes as stream_routes
         
         self.web_app = web.Application()
-        self.web_app['bot'] = self # Make bot instance available to handlers
+        self.web_app['bot'] = self
         
-        # Add routes from both functionalities
         self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
         self.web_app.add_routes(stream_routes)
         
@@ -183,13 +182,11 @@ class Bot(Client):
         site = web.TCPSite(self.web_runner, self.vps_ip, self.vps_port)
         await site.start()
         logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
-    # --- END MODIFIED ---
 
     async def start(self):
         await super().start()
         self.me = await self.get_me()
         
-        # Load channel IDs from DB
         self.owner_db_channel_id = await get_owner_db_channel()
         self.stream_channel_id = await get_stream_channel()
         
@@ -197,7 +194,7 @@ class Bot(Client):
         else: logger.warning("Owner DB ID not set. Use 'Set Owner DB' as admin.")
         
         if self.stream_channel_id: logger.info(f"Loaded Stream Channel ID [{self.stream_channel_id}]")
-        else: logger.warning("Stream Channel ID not set. Use 'Set Stream Channel' as admin.")
+        else: logger.info("Stream Channel not set. Will use Owner DB for streaming.")
             
         try:
             with open(Config.BOT_USERNAME_FILE, 'w') as f: f.write(f"@{self.me.username}")
