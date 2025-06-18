@@ -1,14 +1,9 @@
 import logging
-import math
-import mimetypes
-import time
 from aiohttp import web
-from aiohttp.http_exceptions import BadStatusLine
 from pyrogram.errors import FileIdInvalid
+from util.custom_dl import ByteStreamer
 
-# --- Get the logger instance from the main bot ---
 logger = logging.getLogger(__name__)
-
 routes = web.RouteTableDef()
 
 @routes.get("/", allow_head=True)
@@ -21,42 +16,41 @@ async def root_route_handler(request):
 
 @routes.get("/watch/{message_id:\\d+}", allow_head=True)
 async def watch_handler(request: web.Request):
-    """Renders the HTML watch page for a given file."""
     try:
         message_id = int(request.match_info["message_id"])
         bot = request.app['bot']
-        
-        # We need the render_page utility from the util package
         from util.render_template import render_page
-        
-        # Render the watch page using the file's message ID in the stream channel
         return web.Response(
             text=await render_page(bot, message_id),
             content_type='text/html'
         )
-    except FileIdInvalid:
-        return web.Response(text="File not found or link has expired.", status=404)
     except Exception as e:
-        logger.critical(f"Unexpected error in watch handler for message_id={message_id}: {e}", exc_info=True)
+        logger.critical(f"Unexpected error in watch handler for message_id={request.match_info.get('message_id')}: {e}", exc_info=True)
         return web.Response(text="Internal Server Error", status=500)
 
-
+# --- MODIFIED: Added separate routes for stream and download ---
 @routes.get("/stream/{message_id:\\d+}", allow_head=True)
 async def stream_handler(request: web.Request):
-    """Handles the actual file streaming with byte range requests."""
+    """Handles video playback requests."""
     try:
         message_id = int(request.match_info["message_id"])
         bot = request.app['bot']
-        
-        # We need the ByteStreamer utility from the util package
-        from util.custom_dl import ByteStreamer
-        
-        return await ByteStreamer(bot).stream_media(request, message_id)
-    except FileIdInvalid:
+        return await ByteStreamer(bot).handle_stream_and_download(request, message_id, "inline")
+    except (FileIdInvalid, FileNotFoundError):
         return web.Response(text="File not found or link has expired.", status=404)
-    except (AttributeError, BadStatusLine, ConnectionResetError) as e:
-        logger.warning(f"Streaming connection error for message_id={message_id}: {e}")
-        return web.Response(text="Streaming temporarily unavailable, please try again later.", status=503)
-    except Exception as e:
-        logger.critical(f"Unexpected error in stream handler for message_id={message_id}: {e}", exc_info=True)
+    except Exception:
+        logger.critical(f"Unexpected error in stream handler for message_id={request.match_info.get('message_id')}", exc_info=True)
+        return web.Response(text="Internal Server Error", status=500)
+
+@routes.get("/download/{message_id:\\d+}", allow_head=True)
+async def download_handler(request: web.Request):
+    """Handles direct download requests."""
+    try:
+        message_id = int(request.match_info["message_id"])
+        bot = request.app['bot']
+        return await ByteStreamer(bot).handle_stream_and_download(request, message_id, "attachment")
+    except (FileIdInvalid, FileNotFoundError):
+        return web.Response(text="File not found or link has expired.", status=404)
+    except Exception:
+        logger.critical(f"Unexpected error in download handler for message_id={request.match_info.get('message_id')}", exc_info=True)
         return web.Response(text="Internal Server Error", status=500)
