@@ -9,7 +9,8 @@ from config import Config
 from database.db import (
     get_user, save_file_data, get_owner_db_channel, get_stream_channel, get_file_by_unique_id
 )
-from utils.helpers import clean_filename, notify_and_remove_invalid_channel, get_title_key, get_poster
+# We need create_post back for public channel posts
+from utils.helpers import create_post, clean_filename, notify_and_remove_invalid_channel, get_title_key
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
@@ -51,79 +52,47 @@ class Bot(Client):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
 
-    # --- MODIFIED: _finalize_batch now sends files with attached buttons ---
+    # --- REVERTED: _finalize_batch now uses create_post again for text-based posts ---
     async def _finalize_batch(self, user_id, batch_key):
+        notification_messages = []
         try:
             if user_id not in self.open_batches or batch_key not in self.open_batches[user_id]: return
             batch_data = self.open_batches[user_id].pop(batch_key)
             messages = batch_data['messages']
             if not messages: return
+            
+            first_filename = getattr(messages[0], messages[0].media.value).file_name
+            batch_display_title, _ = clean_filename(first_filename)
 
             user = await get_user(user_id)
-            if not user: return
-            
             post_channels = user.get('post_channels', [])
+            if not user or not post_channels: return
+
             valid_post_channels = []
             for channel_id in post_channels:
                 if await notify_and_remove_invalid_channel(self, user_id, channel_id, "Post"):
                     valid_post_channels.append(channel_id)
             
             if not valid_post_channels:
-                logger.warning(f"User {user_id} has no valid post channels for batch key '{batch_key}'.")
+                logger.warning(f"User {user_id} has no valid post channels for batch '{batch_display_title}'.")
                 return
 
-            # --- Poster Logic ---
-            if user.get('show_poster', True):
-                first_filename = getattr(messages[0], messages[0].media.value).file_name
-                primary_title, year = clean_filename(first_filename)
-                poster = await get_poster(primary_title, year)
-                if poster:
-                    for channel_id in valid_post_channels:
-                        try:
-                            await self.send_photo(channel_id, photo=poster, caption=f"🎬 **{primary_title}**")
-                        except Exception as e:
-                            logger.error(f"Failed to send poster to {channel_id}: {e}")
-
-            # --- File Sending Logic ---
-            for message in messages:
-                media = getattr(message, message.media.value, None)
-                if not media: continue
-
-                file_doc = await get_file_by_unique_id(media.file_unique_id)
-                if not file_doc: continue
-                
-                # Create vertical buttons for this specific file
-                get_link = f"http://{self.vps_ip}:{self.vps_port}/get/{file_doc['file_unique_id']}"
-                watch_link = f"http://{self.vps_ip}:{self.vps_port}/watch/{file_doc['stream_id']}"
-                
-                buttons = [
-                    [InlineKeyboardButton("📥 Download (İndir)", url=get_link)],
-                    [InlineKeyboardButton("▶️ Watch Online (Çevrimiçi İzle)", url=watch_link)]
-                ]
-                
-                # Add user's custom footer buttons
-                user_footer_buttons = user.get('footer_buttons', [])
-                for btn in user_footer_buttons:
-                    buttons.append([InlineKeyboardButton(btn['name'], url=btn['url'])])
-
-                keyboard = InlineKeyboardMarkup(buttons)
-                
-                # Send the file with attached buttons to all post channels
-                for channel_id in valid_post_channels:
-                    await self.send_with_protection(
-                        message.copy,
-                        chat_id=channel_id,
-                        reply_markup=keyboard,
-                        caption=f"`{media.file_name}`" # Add filename as caption
-                    )
-                    await asyncio.sleep(2) # Avoid flood waits
-                    
-        except Exception as e:
-            logger.exception(f"Error finalizing batch {batch_key}: {e}")
+            # Use create_post to generate caption-based posts for public channels
+            posts_to_send = await create_post(self, user_id, messages)
+            
+            for channel_id in valid_post_channels:
+                for post in posts_to_send:
+                    poster, caption, footer = post
+                    if poster: await self.send_with_protection(self.send_photo, channel_id, poster, caption=caption, reply_markup=footer)
+                    else: await self.send_with_protection(self.send_message, channel_id, caption, reply_markup=footer, disable_web_page_preview=True)
+                    await asyncio.sleep(2)
+        except Exception as e: logger.exception(f"Error finalizing batch {batch_key}: {e}")
         finally:
+            for sent_msg in notification_messages:
+                await self.send_with_protection(sent_msg.delete)
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
-    # --- END MODIFIED ---
+    # --- END REVERTED ---
 
     async def file_processor_worker(self):
         logger.info("File Processor Worker started.")
