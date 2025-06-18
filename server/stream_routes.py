@@ -14,6 +14,11 @@ async def root_route_handler(request):
         "bot_status": f"connected_as @{bot_username}"
     })
 
+@routes.get("/favicon.ico", allow_head=True)
+async def favicon_handler(request):
+    """Handles browser requests for favicon.ico to keep logs clean."""
+    return web.Response(status=204) # 204 No Content
+
 @routes.get("/watch/{message_id:\\d+}", allow_head=True)
 async def watch_handler(request: web.Request):
     try:
