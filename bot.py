@@ -1,4 +1,4 @@
-# bot.py (The Final Corrected Version)
+# bot.py (Full Updated Code)
 
 import logging
 import asyncio
@@ -49,17 +49,11 @@ class Bot(Client):
         self.open_batches = {}
         
         # ================================================================= #
-        # VVVVVV YAHAN SABHI ZAROORI ATTRIBUTES ADD KIYE GAYE HAIN VVVVVV #
+        # VVVVVV NAYA DOWNLOAD TRACKING SYSTEM VVVVVV #
         # ================================================================= #
-        # Metadata caching ke liye
-        self.media_cache = {}
-        self.cache_lock = asyncio.Lock()
-
-        # Producer-Consumer model ke liye
-        self.stream_locks = {}
-        self.stream_producers = {}
+        self.active_downloads = {}  # Download progress track karne ke liye
+        self.download_locks = {}    # Race conditions se bachne ke liye
         
-        # VPS config ke liye
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
 
