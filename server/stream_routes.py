@@ -1,4 +1,4 @@
-# server/stream_routes.py (Full Replacement with Caching)
+# server/stream_routes.py (Full Replacement with Magical Fix)
 
 import logging
 import asyncio
@@ -39,20 +39,12 @@ async def watch_handler(request: web.Request):
 
 
 async def stream_or_download(request: web.Request, disposition: str):
-    """
-    Handles streaming with metadata caching to boost performance for external players.
-    """
     bot = request.app['bot']
     message_id_str = request.match_info.get("message_id")
 
     try:
         message_id = int(message_id_str)
-
-        # ================================================================= #
-        # VVVVVV YAHAN PAR NAYA SMART CACHING LOGIC ADD KIYA GAYA HAI VVVVVV #
-        # ================================================================= #
         
-        # Pehle check karein ki file ki details memory mein hain ya nahi
         async with bot.cache_lock:
             media_meta = bot.media_cache.get(message_id)
             if not media_meta:
@@ -67,7 +59,6 @@ async def stream_or_download(request: web.Request, disposition: str):
                     return web.Response(status=404, text="File not found or has no media.")
                 
                 media = getattr(message, message.media.value)
-                # Details ko memory mein save karein
                 media_meta = {
                     "message_object": message,
                     "file_name": getattr(media, "file_name", "unknown.dat"),
@@ -83,7 +74,6 @@ async def stream_or_download(request: web.Request, disposition: str):
         file_size = media_meta["file_size"]
         mime_type = media_meta["mime_type"]
 
-        # Range request logic waisa hi rahega
         range_header = request.headers.get("Range")
         if range_header:
             from_bytes, until_bytes = 0, file_size - 1
@@ -122,9 +112,15 @@ async def stream_or_download(request: web.Request, disposition: str):
         
         streamer = bot.stream_media(message, offset=offset)
         
+        # ================================================================= #
+        # VVVVVV YAHAN PAR MAGICAL FIX LAGAYA GAYA HAI VVVVVV #
+        # ================================================================= #
         async for chunk in streamer:
             try:
                 await response.write(chunk)
+                # Data bhejne ke turant baad, event loop ko doosre kaam karne ka mauka dein.
+                # Yeh pipeline ko smooth rakhta hai.
+                await asyncio.sleep(0) 
             except (ConnectionError, asyncio.CancelledError):
                 logger.warning(f"Client disconnected for message {message_id}. Stopping stream.")
                 break
