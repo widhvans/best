@@ -1,9 +1,7 @@
-# utils/helpers.py (Full Updated Code)
-
 import re
 import base64
 import logging
-import PTN  # <-- Nayi powerful library import ki gayi
+import PTN  # Sirf iska istemal hoga
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
 from config import Config
@@ -13,86 +11,85 @@ from thefuzz import fuzz
 
 logger = logging.getLogger(__name__)
 
-FILES_PER_POST = 20 # Can be adjusted
+FILES_PER_POST = 20
 
 
 def clean_filename(name: str):
     """
-    Cleans a filename using the parse-torrent-name (PTN) library for superior
-    title extraction, while maintaining the required (title, year) return format.
-    This new function improves batching, especially for TV shows.
+    Filename ko saaf karne ke liye sirf PTN library ka istemal karta hai.
+    Fallback logic ko user ke bataye anusaar bahut simple kar diya gaya hai.
+    Returns: (base_title, full_cleaned_name, year)
     """
     if not name:
-        return "Untitled", None
+        return "Untitled", "Untitled", None
 
     try:
-        # PTN se behtareen parsing
+        # Step 1: PTN se best result nikalne ki koshish karein
         parsed_info = PTN.parse(name)
-        
-        title = parsed_info.get('title', '')
+        base_title = parsed_info.get('title', '')
         year = str(parsed_info.get('year')) if parsed_info.get('year') else None
 
-        # TV Shows ke liye special formatting (e.g., "Breaking Bad S01E01")
+        if not base_title:
+            # Agar PTN title na de paye, to error raise karein aur fallback istemal karein
+            raise ValueError("PTN did not find a title.")
+
+        # Step 2: TV Shows ke liye special formatting
         if 'season' in parsed_info and 'episode' in parsed_info:
             season = parsed_info.get('season')
             episode = parsed_info.get('episode')
-            
-            final_title = f"{title} S{str(season).zfill(2)}E{str(episode).zfill(2)}"
-            
+            full_title = f"{base_title} S{str(season).zfill(2)}E{str(episode).zfill(2)}"
             episode_name = parsed_info.get('episodeName')
             if episode_name:
-                final_title = f"{final_title} - {episode_name}"
-            
-            return final_title.strip(), year
+                full_title = f"{full_title} - {episode_name}"
+            return base_title.strip(), full_title.strip(), year
 
-        # Movies ke liye, sirf title aur saal
-        if title:
-            return title.strip(), year
-        
-        # Agar PTN title nahi nikal pata to purane tareeke par fallback karein
-        raise ValueError("PTN could not parse a title.")
+        # Step 3: Movies ke liye, base aur full title ek hi honge
+        return base_title.strip(), base_title.strip(), year
 
     except Exception:
-        # Agar PTN fail hota hai to purana regex wala tareeka istemal hoga
-        logger.warning(f"PTN failed for '{name}', using regex fallback.")
-        cleaned_name = re.sub(r'\.\w+$', '', name)
-        cleaned_name = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', cleaned_name)
-        cleaned_name = re.sub(r'[\._\-\|*&^%$#@!()]', ' ', cleaned_name)
-        cleaned_name = re.sub(r'[^A-Za-z0-9 ]', '', cleaned_name)
+        # ================================================================= #
+        # VVVVVV FALLBACK LOGIC - Bilkul aapke diye gaye code jaisa VVVVVV #
+        # ================================================================= #
+        logger.warning(f"PTN failed for '{name}', using the new simple fallback.")
         
-        year_match = re.search(r'\b(19|20)\d{2}\b', cleaned_name)
-        year_fallback = year_match.group(0) if year_match else None
-        if year_fallback: cleaned_name = cleaned_name.replace(year_fallback, '')
+        # Saal aur bracket hatayein
+        text = re.sub(r'[\(\[].*?[\)\]]', '', name)
         
-        tags = ['1080p', '720p', '480p', '2160p', '4k', 'HD', 'FHD', 'UHD', 'BluRay', 'WEBRip', 'WEB-DL', 'HDRip', 'x264', 'x265', 'HEVC', 'AAC', 'Dual Audio', 'Hindi', 'English', 'Esubs', 'Dubbed', r'S\d+E\d+', r'S\d+', r'Season\s?\d+', r'Part\s?\d+', r'E\d+', r'EP\d+', 'COMPLETE', 'WEB-SERIES']
-        for tag in tags:
-            cleaned_name = re.sub(r'\b' + tag + r'\b', '', cleaned_name, flags=re.I)
+        # Common technical info ke aadhar par split karein
+        match = re.split(r'720p|1080p|4k|web-dl|bluray|hdrip|webrip', text, flags=re.IGNORECASE)
         
-        final_title = re.sub(r'\s+', ' ', cleaned_name).strip()
+        # Saaf title banayein
+        cleaned_title = match[0].replace('.', ' ').replace('_', ' ').strip() if match else text.strip()
         
-        return (final_title, year_fallback) if final_title else (re.sub(r'\.\w+$', '', name).replace(".", " "), None)
+        # Zaroori tuple format mein return karein
+        return cleaned_title, cleaned_title, None
 
 
-# --- create_post IS BACK! ---
-# This function is now used for creating text-based posts for public channels and the backup feature.
 async def create_post(client, user_id, messages):
+    """
+    Naye logic ke saath post banata hai:
+    - Header mein sirf base title.
+    - File links mein poora saaf naam.
+    """
     user = await get_user(user_id)
     if not user: return []
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
     if not first_media_obj: return []
-    primary_title, year = clean_filename(first_media_obj.file_name)
+
+    primary_base_title, _, year = clean_filename(first_media_obj.file_name)
     
     def similarity_sorter(msg):
         media_obj = getattr(msg, msg.media.value, None)
         if not media_obj: return (1.0, "")
-        title, _ = clean_filename(media_obj.file_name)
-        similarity_score = 1.0 - calculate_title_similarity(primary_title, title)
+        base, _, _ = clean_filename(media_obj.file_name)
+        similarity_score = 1.0 - calculate_title_similarity(primary_base_title, base)
         natural_key = natural_sort_key(media_obj.file_name)
         return (similarity_score, natural_key)
     messages.sort(key=similarity_sorter)
     
-    base_caption_header = f"🎬 **{primary_title} {f'({year})' if year else ''}**"
-    post_poster = await get_poster(primary_title, year) if user.get('show_poster', True) else None
+    base_caption_header = f"🎬 **{primary_base_title} {f'({year})' if year else ''}**"
+    
+    post_poster = await get_poster(primary_base_title, year) if user.get('show_poster', True) else None
     footer_buttons = user.get('footer_buttons', [])
     footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
     
@@ -105,17 +102,31 @@ async def create_post(client, user_id, messages):
         for m in chunk:
             media = getattr(m, m.media.value, None)
             if not media: continue
-            label, _ = clean_filename(media.file_name)
-            # Public posts use the /get/ link to drive traffic to the bot
+            
+            _, full_cleaned_label, _ = clean_filename(media.file_name)
+            
             link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
-            links.append(f"📁 `{label or media.file_name}` - [Click Here to Get File]({link})")
+            
+            links.append(f"📁 `{full_cleaned_label or media.file_name}` - [Click Here to Get File]({link})")
         
         final_caption = f"{header}\n\n" + "\n\n".join(links)
         posts.append((post_poster, final_caption, footer_keyboard))
         
     return posts
-# --- END create_post ---
 
+
+def get_title_key(filename: str) -> str:
+    """
+    Files ko batch mein group karne ke liye key banata hai.
+    Yeh sirf base title ka istemal karta hai taaki ek show ke saare episodes ek saath group ho.
+    """
+    base_title, _, _ = clean_filename(filename)
+    return base_title.lower().strip()
+
+
+# ================================================================= #
+# Neeche ka code waisa hi hai, usmein koi badlav nahi hai
+# ================================================================= #
 
 async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
     try:
@@ -143,18 +154,6 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
     except Exception as e:
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
         return False
-
-def get_title_key(filename: str, num_words: int = 3) -> str:
-    cleaned_title, _ = clean_filename(filename)
-    # For TV shows like "Title S01E01", the whole thing should be the key
-    if re.search(r'S\d+E\d+', cleaned_title, re.I):
-        return cleaned_title.rsplit(' ', 2)[0] # "Title S01E01 - Episode Name" -> "Title S01E01"
-    
-    words = cleaned_title.split()
-    if any(re.match(r's\d+', word, re.I) for word in words):
-        num_words = 4
-    key_words = words[:num_words]
-    return " ".join(key_words).lower()
 
 def calculate_title_similarity(title1: str, title2: str) -> float:
     return fuzz.token_sort_ratio(title1, title2) / 100.0
