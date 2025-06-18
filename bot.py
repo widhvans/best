@@ -1,6 +1,8 @@
+# bot.py (Full Updated Code)
+
 import logging
 import asyncio
-import socket  # Python ki core socket library
+import socket
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -40,8 +42,7 @@ class Bot(Client):
         )
         self.me = None
         self.web_app = None
-        # web_runner ko hata kar web_server add kiya gaya hai
-        self.web_server = None
+        self.web_runner = None # web_server se wapas web_runner par
         
         self.owner_db_channel_id = None
         self.stream_channel_id = None
@@ -56,7 +57,7 @@ class Bot(Client):
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
 
-    # Baaki ke functions (_reset_notification_flag, _finalize_batch, etc.) waise hi rahenge...
+    # Baaki ke functions (_reset_notification_flag, etc.) waise hi rahenge...
     def _reset_notification_flag(self, channel_id):
         self.notification_flags[channel_id] = False
         logger.info(f"Notification flag reset for channel {channel_id}.")
@@ -174,22 +175,14 @@ class Bot(Client):
         self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
         self.web_app.add_routes(stream_routes)
         
-        # ================================================================= #
-        # VVVVVV YAHAN PAR SERVER START KARNE KA NAYA, BULLETPROOF TAREEKA HAI VVVVVV #
-        # ================================================================= #
+        # DeprecationWarning fix: aiohttp ke modern AppRunner API ka istemal
+        self.web_runner = web.AppRunner(self.web_app)
+        await self.web_runner.setup()
         
-        loop = asyncio.get_running_loop()
+        site = web.TCPSite(self.web_runner, self.vps_ip, self.vps_port)
         
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.vps_ip, self.vps_port))
-        sock.listen()
-        
-        # Server ko self.web_server mein store karein taaki use baad mein band kar sakein
-        self.web_server = await loop.create_server(self.web_app.make_handler(), sock=sock)
-        
-        logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port} with performance optimizations.")
+        await site.start()
+        logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
 
     async def start(self):
         await super().start()
@@ -210,10 +203,8 @@ class Bot(Client):
 
     async def stop(self, *args):
         logger.info("Stopping bot...")
-        # Web server ko aaram se band karein
-        if self.web_server:
-            self.web_server.close()
-            await self.web_server.wait_closed()
+        if self.web_runner:
+            await self.web_runner.cleanup()
         await super().stop()
         logger.info("Bot stopped.")
 
