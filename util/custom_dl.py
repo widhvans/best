@@ -52,13 +52,13 @@ class ByteStreamer:
         else:
             return types.InputDocumentFileLocation(id=file_id.media_id, access_hash=file_id.access_hash, file_reference=file_id.file_reference, thumb_size=file_id.thumbnail_size)
 
-    # --- FINALIZED: Simplified and stable streaming logic ---
-    async def stream_media(self, request, message_id: int):
+    # --- FINALIZED: Stable, linear streaming logic ---
+    async def stream_media(self, request: web.Request, message_id: int) -> web.StreamResponse:
         try:
             file_prop = await self.get_file_properties(message_id)
         except Exception as e:
             logger.exception("Could not get file properties for streaming.")
-            return web.Response(status=500, text=f"Failed to get file properties: {e}")
+            raise web.HTTPInternalServerError(text=f"Failed to get file properties: {e}")
 
         file_size = file_prop.file_size
         range_header = request.headers.get("Range", f"bytes=0-{file_size-1}")
@@ -68,10 +68,10 @@ class ByteStreamer:
             from_bytes = int(from_bytes_str)
             until_bytes = int(until_bytes_str) if until_bytes_str else file_size - 1
         except (ValueError, IndexError):
-            return web.Response(status=400, text="Invalid Range header")
+            raise web.HTTPBadRequest(text="Invalid Range header")
 
-        if from_bytes >= file_size or until_bytes >= file_size or from_bytes > until_bytes:
-            return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+        if from_bytes >= file_size or from_bytes > until_bytes:
+            raise web.HTTPRequestRangeNotSatisfiable(headers={"Content-Range": f"bytes */{file_size}"})
 
         req_length = until_bytes - from_bytes + 1
         
@@ -87,40 +87,52 @@ class ByteStreamer:
         )
         await response.prepare(request)
 
+        chunk_size = 1024 * 1024  # 1MB
+        # Align the initial offset to a 4096-byte boundary
         offset = from_bytes - (from_bytes % 4096)
+        
+        # Calculate how many bytes to skip from the first downloaded chunk
         first_part_cut = from_bytes - offset
-        bytes_to_yield = req_length
-        chunk_size = 1024 * 1024 # 1MB
+        
+        # Calculate the total number of bytes we need to send
+        bytes_to_send = req_length
 
         try:
             media_session = await self._get_media_session(file_prop.dc_id)
             location = self._get_input_location(file_prop)
 
-            while bytes_to_yield > 0:
+            while bytes_to_send > 0:
+                # Download a chunk from Telegram
                 chunk = await media_session.invoke(
                     functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
                 )
                 
                 if not isinstance(chunk, types.upload.File) or not chunk.bytes:
-                    break
+                    break # End of file from Telegram
 
+                # Slice the downloaded chunk to get the exact part we need
                 if first_part_cut > 0:
                     output_data = chunk.bytes[first_part_cut:]
-                    first_part_cut = 0
+                    first_part_cut = 0 # Only apply this to the first chunk
                 else:
                     output_data = chunk.bytes
 
-                if len(output_data) > bytes_to_yield:
-                    output_data = output_data[:bytes_to_yield]
-
+                # Trim the last chunk to the exact size
+                if len(output_data) > bytes_to_send:
+                    output_data = output_data[:bytes_to_send]
+                
+                # Write the data to the client and handle disconnection
                 await response.write(output_data)
                 
-                bytes_to_yield -= len(output_data)
-                offset += len(chunk.bytes)
+                bytes_to_send -= len(output_data)
+                
+                # **THE CRITICAL FIX:** Always increment the offset by the chunk size requested,
+                # not the length of the data received.
+                offset += chunk_size
                 
         except (ConnectionResetError, asyncio.CancelledError):
-            logger.warning("Client disconnected.")
+            logger.warning("Client disconnected during streaming.")
         except Exception as e:
-            logger.exception(f"Error during file streaming: {e}")
+            logger.exception(f"An error occurred during file streaming: {e}")
         
         return response
