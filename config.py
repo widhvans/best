@@ -1,5 +1,3 @@
-# config.py (Full Updated Code)
-
 import os
 
 class Config:
