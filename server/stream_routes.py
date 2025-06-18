@@ -1,15 +1,65 @@
-# server/stream_routes.py (The Final Bulletproof Version)
+# server/stream_routes.py (The Final, Most Stable "Superfast Sequential Streamer")
 
 import logging
 import asyncio
-import math
 from aiohttp import web
-from util.custom_dl import ByteStreamer
-from util.file_properties import get_file_properties, FileIdError
+from pyrogram.errors import FileIdInvalid
 from util.render_template import render_page 
 
 logger = logging.getLogger(__name__)
 routes = web.RouteTableDef()
+
+
+async def get_media_meta(message_id, bot):
+    """
+    A central function to get file details from cache or fetch and cache them.
+    """
+    async with bot.cache_lock:
+        media_meta = bot.media_cache.get(message_id)
+        if not media_meta:
+            logger.info(f"Cache MISS for message_id: {message_id}. Fetching from Telegram.")
+            chat_id = bot.stream_channel_id or bot.owner_db_channel_id
+            if not chat_id:
+                raise ValueError("Streaming channels not configured.")
+            
+            message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
+
+            if not message or not message.media:
+                raise FileIdInvalid(f"Message {message_id} not found or has no media.")
+            
+            media = getattr(message, message.media.value)
+            media_meta = {
+                "message_object": message,
+                "file_name": getattr(media, "file_name", "unknown.dat"),
+                "file_size": int(getattr(media, "file_size", 0)),
+                "mime_type": getattr(media, "mime_type", "application/octet-stream")
+            }
+            bot.media_cache[message_id] = media_meta
+        else:
+            logger.info(f"Cache HIT for message_id: {message_id}. Using memory cache.")
+    return media_meta
+
+
+async def producer(bot, message_id):
+    """
+    Dedicated downloader (Producer). It downloads the file and puts chunks into a queue.
+    This runs only once per file, no matter how many clients connect.
+    """
+    producer_info = bot.stream_producers[message_id]
+    try:
+        media_meta = await get_media_meta(message_id, bot)
+        message = media_meta["message_object"]
+        streamer = bot.stream_media(message)
+        
+        async for chunk in streamer:
+            await producer_info['queue'].put(chunk)
+            
+    except Exception as e:
+        logger.error(f"Producer for message {message_id} failed: {e}", exc_info=True)
+        await producer_info['queue'].put(None) # Signal error to consumers
+    finally:
+        await producer_info['queue'].put(None) # Signal end of stream
+        logger.info(f"Producer for message {message_id} has finished.")
 
 
 @routes.get("/", allow_head=True)
@@ -39,66 +89,60 @@ async def watch_handler(request: web.Request):
 
 
 async def stream_or_download(request: web.Request, disposition: str):
+    """
+    Handles streaming using the stable Producer-Consumer model without range requests.
+    This provides maximum stability and throughput for bot accounts.
+    """
+    bot = request.app['bot']
     message_id_str = request.match_info.get("message_id")
     try:
         message_id = int(message_id_str)
-        bot = request.app['bot']
-        streamer = ByteStreamer(bot)
-
-        file_id = await streamer.get_file_properties(message_id)
         
-        file_size = file_id.file_size
-        range_header = request.headers.get("Range", 0)
+        lock = bot.stream_locks.setdefault(message_id, asyncio.Lock())
+        
+        async with lock:
+            if message_id not in bot.stream_producers:
+                queue = asyncio.Queue()
+                task = asyncio.create_task(producer(bot, message_id))
+                bot.stream_producers[message_id] = {'task': task, 'queue': queue}
+                logger.info(f"Started new producer task for message_id: {message_id}")
 
+        producer_info = bot.stream_producers[message_id]
+        
+        media_meta = await get_media_meta(message_id, bot)
+        
+        # ================================================================= #
+        # VVVVVV RANGE REQUEST LOGIC HATA DIYA GAYA HAI - STABILITY KE LIYE VVVVVV #
+        # ================================================================= #
         headers = {
-            "Content-Type": file_id.mime_type,
-            "Content-Disposition": f'{disposition}; filename="{file_id.file_name}"',
-            "Accept-Ranges": "bytes",
+            "Content-Type": media_meta["mime_type"],
+            "Content-Disposition": f'{disposition}; filename="{media_meta["file_name"]}"',
+            "Content-Length": str(media_meta["file_size"])
         }
         
-        if range_header:
-            from_bytes, until_bytes = range_header.replace("bytes=", "").split("-")
-            from_bytes = int(from_bytes)
-            until_bytes = int(until_bytes) if until_bytes else file_size - 1
-            
-            if (from_bytes > file_size) or (until_bytes >= file_size):
-                return web.Response(status=416)
-            
-            # Telegram ke block size ke hisaab se offset ko align karein
-            chunk_size = 1024 * 1024
-            offset = from_bytes - (from_bytes % chunk_size)
-            first_part_cut = from_bytes - offset
-            last_part_cut = (until_bytes % chunk_size) + 1 if until_bytes % chunk_size != -1 else chunk_size
-            part_count = math.ceil((until_bytes - offset + 1) / chunk_size)
-            
-            body = streamer.yield_file(
-                file_id, offset, first_part_cut, last_part_cut, part_count, chunk_size
-            )
-            
-            headers["Content-Length"] = str(until_bytes - from_bytes + 1)
-            headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
-            status = 206
-        else:
-            body = streamer.yield_file(file_id, 0, 0, file_size, 1, file_size)
-            headers["Content-Length"] = str(file_size)
-            status = 200
-
-        response = web.StreamResponse(status=status, headers=headers)
+        response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         
-        async for chunk in body:
+        queue = producer_info['queue']
+
+        while True:
+            chunk = await queue.get()
+            
+            if chunk is None: # Download poora hua ya fail ho gaya
+                break
+            
             try:
                 await response.write(chunk)
-                await asyncio.sleep(0)
+                await asyncio.sleep(0) # Pipeline ko smooth rakhne ke liye
             except (ConnectionError, asyncio.CancelledError):
-                logger.warning(f"Client disconnected for message {message_id}. Stopping stream.")
+                logger.warning(f"Consumer for message {message_id} disconnected.")
                 break
         
         return response
 
-    except (FileIdError, ValueError) as e:
-        logger.warning(f"File ID or configuration error for stream request: {e}")
-        return web.Response(status=404, text=f"File not found or link expired: {e}")
+    except (FileIdInvalid, ValueError) as e:
+        logger.error(f"File ID or configuration error for stream request: {e}")
+        return web.Response(status=404, text="File not found or link expired.")
     except Exception:
         logger.critical(f"FATAL: Unexpected error in stream/download handler for message_id={message_id_str}", exc_info=True)
         return web.Response(status=500, text="Internal Server Error")
