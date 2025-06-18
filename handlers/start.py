@@ -1,5 +1,3 @@
-# handlers/start.py (Full Updated Code)
-
 import logging
 from pyrogram import Client, filters, enums
 from pyrogram.errors import UserNotParticipant, MessageNotModified, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
@@ -26,7 +24,6 @@ async def handle_private_file(client, message):
             [InlineKeyboardButton("▶️ Watch Online", url=watch_link)]
         ]
         keyboard = InlineKeyboardMarkup(buttons)
-        # Use send_cached_media for faster response, especially with documents
         await client.send_cached_media(
             chat_id=message.chat.id,
             file_id=message.media.file_id,
@@ -91,10 +88,23 @@ async def start_command(client, message):
                     owner_settings = await get_user(owner_id)
                     
                     if owner_settings and owner_settings.get('shortener_mode') == '12_hour':
+                        
+                        # ================================================================= #
+                        # VVVVVV YAHAN PAR Galti ko Theek Kiya Gaya Hai VVVVVV #
+                        # ================================================================= #
+                        
+                        # Step 1: Pehle check karein ki user pehle se verified tha ya nahi
+                        was_already_verified = await is_user_verified(user_id, owner_id)
+
+                        # Step 2: Verification ke liye file ko claim karein
                         claim_successful = await claim_verification_for_file(file_unique_id, user_id, owner_id)
-                        if claim_successful:
+                        
+                        # Step 3: Success message sirf tabhi bhejein jab user pehle se verified NAHI tha, 
+                        # lekin ab claim successful ho gaya hai.
+                        if claim_successful and not was_already_verified:
                             await client.send_message(user_id, "✅ **Verification Successful!**\n\nYou can now get direct links from this user's channels for the next 12 hours.")
                 
+                # File har haal mein bhejein
                 await send_file(client, user_id, file_unique_id)
 
             elif payload.startswith("ownerget_"):
@@ -108,9 +118,6 @@ async def start_command(client, message):
             logger.exception("Error processing deep link in /start")
             await message.reply_text("Something went wrong.")
     else:
-        # ================================================================= #
-        # VVVVVV YAHAN PAR BUTTONS MEIN BADLAV KIYA GAYA HAI VVVVVV #
-        # ================================================================= #
         text = (
             f"Hello {message.from_user.mention}! 👋\n\n"
             "I am your personal **File Storage & Auto-Posting Bot**.\n\n"
@@ -120,12 +127,9 @@ async def start_command(client, message):
             "Click the button below to begin!"
         )
         
-        # Naya keyboard banaya gaya hai, jismein Tutorial button bhi hai
         keyboard = InlineKeyboardMarkup(
             [
-                # Pehli line mein "Let's Go" button
                 [InlineKeyboardButton("Let's Go 🚀", callback_data=f"go_back_{user_id}")],
-                # Doosri line mein "Tutorial" button
                 [InlineKeyboardButton("Tutorial 🎬", url=Config.TUTORIAL_URL)]
             ]
         )
@@ -144,10 +148,8 @@ async def handle_public_file_request(client, message, user_id, payload):
     fsub_channel = owner_settings.get('fsub_channel')
     if fsub_channel:
         try:
-            # Check if bot is admin
             await client.get_chat_member(chat_id=fsub_channel, user_id="me")
             try:
-                # Check if user is member
                 await client.get_chat_member(chat_id=fsub_channel, user_id=user_id)
             except UserNotParticipant:
                 try: invite_link = await client.export_chat_invite_link(fsub_channel)
