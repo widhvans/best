@@ -17,10 +17,6 @@ FILES_PER_POST = 20
 def clean_filename(name: str):
     """
     The definitive 'champion pro' filename cleaner.
-    1. Pre-cleans the name to help PTN.
-    2. Uses PTN for best-in-class parsing.
-    3. Has a much more robust fallback if PTN fails.
-    Returns: (base_title, full_cleaned_name, year)
     """
     if not name:
         return "Untitled", "Untitled", None
@@ -65,9 +61,7 @@ def clean_filename(name: str):
 
 async def create_post(client, user_id, messages):
     """
-    Naye logic ke saath post banata hai:
-    - @promotions ko hatata hai.
-    - Button ko file ke naam ke neeche rakhta hai.
+    Creates a professionally designed post with clean titles and layout.
     """
     user = await get_user(user_id)
     if not user: return []
@@ -76,21 +70,41 @@ async def create_post(client, user_id, messages):
 
     primary_base_title, _, year = clean_filename(first_media_obj.file_name)
     
+    # ================================================================= #
+    # VVVVVV YAHAN PAR NAYA LOGIC ADD KIYA GAYA HAI VVVVVV #
+    # ================================================================= #
+
+    # Step 1: Main Title se saare promotions hatayein
+    # Yeh @username aur 'Join Us...' jaise phrases ko hata dega
+    cleaned_primary_title = re.sub(r'@\S+', '', primary_base_title)
+    cleaned_primary_title = re.sub(r'Join Us On Telegram', '', cleaned_primary_title, flags=re.IGNORECASE)
+    # Agar koi aur common promotional text hai, to use bhi yahan add kar sakte hain
+    # cleaned_primary_title = re.sub(r'YourSpamText', '', cleaned_primary_title, flags=re.IGNORECASE)
+    cleaned_primary_title = cleaned_primary_title.strip()
+
+
     def similarity_sorter(msg):
         media_obj = getattr(msg, msg.media.value, None)
         if not media_obj: return (1.0, "")
         base, _, _ = clean_filename(media_obj.file_name)
-        similarity_score = 1.0 - calculate_title_similarity(primary_base_title, base)
+        # Sorting ke liye saaf title ka istemal karein
+        similarity_score = 1.0 - calculate_title_similarity(cleaned_primary_title, base)
         natural_key = natural_sort_key(media_obj.file_name)
         return (similarity_score, natural_key)
     messages.sort(key=similarity_sorter)
     
-    base_caption_header = f"🎬 **{primary_base_title} {f'({year})' if year else ''}**"
+    # Post header ke liye saaf title istemal karein
+    base_caption_header = f"🎬 **{cleaned_primary_title} {f'({year})' if year else ''}**"
     
-    post_poster = await get_poster(primary_base_title, year) if user.get('show_poster', True) else None
+    # Poster ke liye bhi saaf title ka istemal karein
+    post_poster = await get_poster(cleaned_primary_title, year) if user.get('show_poster', True) else None
+    
     footer_buttons = user.get('footer_buttons', [])
     footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
     
+    # Step 2: Post ke design ke liye ek decorative line banayein
+    decorative_line = "▰▱▰▱▰▱▰▱▰▱▰▱▰▱▰▱"
+
     posts, total = [], len(messages)
     num_posts = (total + FILES_PER_POST - 1) // FILES_PER_POST
     for i in range(num_posts):
@@ -103,12 +117,10 @@ async def create_post(client, user_id, messages):
             
             _, full_cleaned_label, _ = clean_filename(media.file_name)
             
-            # ================================================================= #
-            # VVVVVV YAHAN PAR AAPKE BATAYE ANUSAAR BADLAV KIYE GAYE HAIN VVVVVV #
-            # ================================================================= #
-            
-            # Step 1: Label se @username/@channelname hatayein
-            label_no_mentions = re.sub(r'@\S+', '', full_cleaned_label).strip()
+            # Label se bhi promotions hatayein
+            label_no_mentions = re.sub(r'@\S+', '', full_cleaned_label)
+            label_no_mentions = re.sub(r'Join Us On Telegram', '', label_no_mentions, flags=re.IGNORECASE)
+            label_no_mentions = label_no_mentions.strip()
 
             parsed_info = PTN.parse(media.file_name)
             extra_tags = [
@@ -122,18 +134,18 @@ async def create_post(client, user_id, messages):
 
             link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
             
-            # Step 2: Naye layout ke saath file entry banayein
             file_entry = f"📁 `{label_no_mentions or media.file_name}`"
             
             if filtered_text:
                 file_entry += f"\n   `{filtered_text}`"
             
-            # Step 3: Button ko agli line mein "Click Here" naam se add karein
-            file_entry += f"\n   [Click Here]({link})"
+            # Step 3: Button mein arrow emoji (➤) add karein
+            file_entry += f"\n   [➤ Click Here]({link})"
             
             links.append(file_entry)
 
-        final_caption = f"{header}\n\n" + "\n\n".join(links)
+        # Step 4: Final caption mein decorative line add karein
+        final_caption = f"{header}\n\n{decorative_line}\n\n" + "\n\n".join(links)
         posts.append((post_poster, final_caption, footer_keyboard))
         
     return posts
@@ -141,7 +153,10 @@ async def create_post(client, user_id, messages):
 
 def get_title_key(filename: str) -> str:
     base_title, _, _ = clean_filename(filename)
-    return base_title.lower().strip()
+    # Key ke liye bhi saaf title ka istemal karein
+    cleaned_base_title = re.sub(r'@\S+', '', base_title)
+    cleaned_base_title = re.sub(r'Join Us On Telegram', '', cleaned_base_title, flags=re.IGNORECASE)
+    return cleaned_base_title.lower().strip()
 
 
 # ================================================================= #
