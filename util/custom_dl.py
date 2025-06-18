@@ -29,7 +29,7 @@ class ByteStreamer:
     async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
         """
         Handles both streaming ('inline') and downloading ('attachment').
-        - Validates cached files and serves with range support.
+        - Validates cached files and serves with range support for both.
         - Streams from Telegram while caching if no valid cache.
         """
         try:
@@ -61,7 +61,7 @@ class ByteStreamer:
                             start, end = range_header.replace("bytes=", "").split("-")
                             start = int(start) if start else 0
                             end = int(end) if end else file_size - 1
-                            if start >= file_size or end >= file_size or start > end or start < 0 or end < 0:
+                            if start >= file_size or end >= file_size or start < 0 or end < 0 or start > end:
                                 logger.warning(f"Invalid range request for message_id: {message_id}, start: {start}, end: {end}, file_size: {file_size}")
                                 headers.update({
                                     "Content-Range": f"bytes */{file_size}",
@@ -83,6 +83,7 @@ class ByteStreamer:
                                         break
                                     await response.write(chunk)
                                     remaining -= len(chunk)
+                            logger.info(f"Served range {start}-{end} for message_id: {message_id}")
                             return response
                         except ValueError:
                             logger.warning(f"Invalid range header format for message_id: {message_id}, range: {range_header}")
@@ -91,11 +92,16 @@ class ByteStreamer:
                             })
                             return web.StreamResponse(status=416, headers=headers)
                     else:
-                        return web.FileResponse(
-                            file_path,
-                            chunk_size=256*1024,
-                            headers=headers
-                        )
+                        response = web.StreamResponse(headers=headers)
+                        await response.prepare(request)
+                        async with aiofiles.open(file_path, "rb") as f:
+                            while True:
+                                chunk = await f.read(256*1024)
+                                if not chunk:
+                                    break
+                                await response.write(chunk)
+                        logger.info(f"Served full file for message_id: {message_id}, size: {file_size}")
+                        return response
 
             lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
             async with lock:
