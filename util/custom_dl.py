@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import aiofiles
-import aiohttp # <-- aiohttp import zaroori hai
+import aiohttp
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.types import Message
@@ -26,78 +26,65 @@ class ByteStreamer:
         return await self.client.get_messages(stream_channel, message_id)
 
     async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
-        """
-        Handles both streaming ('inline') and downloading ('attachment').
-        - If file is cached, serves it directly.
-        - If not, streams from Telegram while caching.
-        """
-        try:
-            message = await self.get_message(message_id)
-            if not message or not message.media:
-                raise web.HTTPNotFound(text="File not found or has no media.")
-            
-            media = getattr(message, message.media.value)
-            file_name = getattr(media, "file_name", f"download_{message_id}")
-            file_path = os.path.join(DOWNLOAD_DIR, f"{message_id}_{file_name.replace('/', '_')}")
+        # Is function se outermost try/except hata diya gaya hai taaki errors upar handle ho.
+        message = await self.get_message(message_id)
+        if not message or not message.media:
+            raise web.HTTPNotFound(text="File not found or has no media.")
+        
+        media = getattr(message, message.media.value)
+        file_name = getattr(media, "file_name", f"download_{message_id}")
+        file_path = os.path.join(DOWNLOAD_DIR, f"{message_id}_{file_name.replace('/', '_')}")
 
+        if os.path.exists(file_path):
+            logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk with disposition: {disposition}")
+            return web.FileResponse(
+                file_path, 
+                chunk_size=256*1024, 
+                headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'}
+            )
+
+        lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
+        async with lock:
             if os.path.exists(file_path):
-                logger.info(f"Cache HIT for message_id: {message_id}. Serving from disk with disposition: {disposition}")
                 return web.FileResponse(
-                    file_path, 
-                    chunk_size=256*1024, 
+                    file_path,
+                    chunk_size=256*1024,
                     headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'}
                 )
 
-            lock = DOWNLOAD_LOCKS.setdefault(message_id, asyncio.Lock())
-            async with lock:
-                if os.path.exists(file_path):
-                    return web.FileResponse(
-                        file_path,
-                        chunk_size=256*1024,
-                        headers={"Content-Disposition": f'{disposition}; filename="{file_name}"'}
-                    )
+            logger.info(f"Cache MISS for message_id: {message_id}. Streaming and caching.")
+            
+            response = web.StreamResponse(
+                headers={
+                    "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                    "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                }
+            )
+            await response.prepare(request)
 
-                logger.info(f"Cache MISS for message_id: {message_id}. Streaming and caching.")
+            temp_file_path = file_path + ".temp"
+            
+            try:
+                async with aiofiles.open(temp_file_path, "wb") as cache_file:
+                    async for chunk in self.client.stream_media(message):
+                        await response.write(chunk)
+                        await cache_file.write(chunk)
                 
-                response = web.StreamResponse(
-                    headers={
-                        "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
-                        "Content-Disposition": f'{disposition}; filename="{file_name}"',
-                    }
-                )
-                await response.prepare(request)
+                os.rename(temp_file_path, file_path)
+                logger.info(f"Caching complete for message_id: {message_id}")
 
-                temp_file_path = file_path + ".temp"
-                
-                try:
-                    async with aiofiles.open(temp_file_path, "wb") as cache_file:
-                        async for chunk in self.client.stream_media(message):
-                            await response.write(chunk)
-                            await cache_file.write(chunk)
-                    
-                    os.rename(temp_file_path, file_path)
-                    logger.info(f"Caching complete for message_id: {message_id}")
-
-                # ================================================================= #
-                # VVVVVV YAHAN PAR CHAMPION PRO FIX LAGA DIYA GAYA HAI VVVVVV #
-                # ================================================================= #
-                except (asyncio.CancelledError, ConnectionError, aiohttp.ClientError) as e:
-                    logger.warning(
-                        f"Client disconnected or connection error during stream for message_id {message_id}. "
-                        f"Error Type: {type(e).__name__}. This is a normal event and not a bot failure."
-                    )
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
-                # ================================================================= #
-                # ^^^^^^ YAHI HAI ASLI FIX, JO SAB CONNECTION ERRORS SAMBHAL LEGA ^^^^^^ #
-                # ================================================================= #
-                except Exception as e:
-                    logger.exception(f"A truly unexpected error occurred during stream/cache for message_id {message_id}: {e}")
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
-                
-                return response
-
-        except Exception as e:
-            logger.exception(f"A critical error occurred in handle_stream_and_download for message_id {message_id}: {e}")
-            raise web.HTTPInternalServerError(text="An internal server error occurred.")
+            except (asyncio.CancelledError, aiohttp.ClientError, ConnectionError):
+                logger.warning(f"Temp file cleanup: Client disconnected during stream for message_id: {message_id}")
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+                # Error ko upar bhejein taaki route handler ise pakad sake
+                raise
+            
+            except Exception as e:
+                logger.exception(f"Temp file cleanup: Unexpected error during stream for message_id {message_id}: {e}")
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+                # Error ko upar bhejein taaki route handler ise pakad sake
+                raise
+            
+            return response
