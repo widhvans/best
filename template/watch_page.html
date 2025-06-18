@@ -60,7 +60,6 @@
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px; margin: 20px 0;
         }
-        /* --- FIX: Style both buttons and a.button links the same way --- */
         button, a.button {
             padding: 15px;
             background: linear-gradient(45deg, #00d4ff, #ff2e63);
@@ -69,7 +68,7 @@
             border: none; border-radius: 10px; cursor: pointer;
             transition: transform 0.3s ease, box-shadow 0.3s ease;
             display: flex; align-items: center; justify-content: center; gap: 10px;
-            text-decoration: none; /* Remove underline from link */
+            text-decoration: none;
             box-sizing: border-box;
         }
         button:hover, a.button:hover {
@@ -91,7 +90,10 @@
     </div>
     <div class="container">
         <div class="player-container">
-            <video id="player" class="player" src="{{ stream_url }}" playsinline controls preload="metadata"></video>
+            <video id="player" class="player" playsinline controls preload="metadata">
+                <source src="{{ stream_url }}" type="{{ mime_type }}">
+                Your browser does not support the video tag.
+            </video>
         </div>
         <div class="buttons-grid">
             <button onclick="openExternalPlayer('vlc')"><i class="fas fa-play"></i> Watch in VLC</button>
@@ -100,11 +102,10 @@
         </div>
     </div>
     <footer>
-        &copy; 2025 Your Bot Name. All rights reserved.
+        © 2025 Your Bot Name. All rights reserved.
     </footer>
     <script>
         const streamUrl = "{{ stream_url }}";
-        // The downloadUrl is now handled by the <a> tag, so JS is not needed for it.
         
         function openExternalPlayer(player) {
             const httpUrl = streamUrl.replace(/^https?:\/\//, 'http://');
@@ -121,6 +122,12 @@
             }
             window.location.href = intentUrl;
         }
+
+        const video = document.getElementById('player');
+        video.addEventListener('error', (e) => {
+            console.error('Video playback error:', e);
+            video.load(); // Attempt to reload the video
+        });
     </script>
 </body>
 </html>
