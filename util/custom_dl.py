@@ -20,15 +20,122 @@ class ByteStreamer:
             stream_channel = self.client.owner_db_channel_id
         if not stream_channel:
             raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
+        
         message = await self.client.get_messages(stream_channel, message_id)
         if not message or not message.media:
             raise FileIdInvalid
+
         media = getattr(message, message.media.value)
         file_id = FileId.decode(media.file_id)
         setattr(file_id, "file_size", media.file_size)
         setattr(file_id, "mime_type", media.mime_type)
         setattr(file_id, "file_name", media.file_name)
         return file_id
+
+    # --- NEW: Asynchronous Producer to pre-fetch chunks from Telegram ---
+    async def _producer(
+        self,
+        response: web.StreamResponse,
+        file_prop: FileId,
+        from_bytes: int,
+        until_bytes: int,
+    ):
+        """
+        This function runs in the background, continuously fetching chunks
+        from Telegram and putting them into the response buffer.
+        """
+        chunk_size = 1024 * 1024  # 1MB
+        offset = from_bytes - (from_bytes % 4096)
+        
+        media_session = await self._get_media_session(file_prop.dc_id)
+        location = self._get_input_location(file_prop)
+        
+        try:
+            while offset < until_bytes:
+                # Ensure the response is still writable
+                if response.is_eof():
+                    break
+                
+                limit = chunk_size
+                try:
+                    chunk = await media_session.invoke(
+                        functions.upload.GetFile(location=location, offset=offset, limit=limit)
+                    )
+                    if isinstance(chunk, types.upload.File):
+                        await response.write(chunk.bytes)
+                        offset += limit
+                    else:
+                        break # End of file or error
+                except LimitInvalid:
+                    # This should be rare with the fixed limit, but handle it
+                    logger.warning("Received LimitInvalid from Telegram, retrying with smaller chunk.")
+                    await asyncio.sleep(0.5)
+                    continue
+                except Exception:
+                    # If any other error, stop the producer
+                    logger.exception("Producer failed to get chunk from Telegram.")
+                    break
+        except (asyncio.CancelledError, ConnectionResetError):
+            logger.warning("Producer task cancelled or connection reset.")
+        finally:
+            # Signal that we are done writing
+            await response.write_eof()
+
+    async def stream_media(self, request, message_id: int):
+        """
+        Sets up the streaming response and starts the producer task.
+        This function itself does not stream, it manages the process.
+        """
+        try:
+            file_prop = await self.get_file_properties(message_id)
+        except ValueError as e:
+            logger.error(f"Configuration error during streaming: {e}")
+            return web.Response(status=500, text=str(e))
+        
+        file_size = file_prop.file_size
+        range_header = request.headers.get("Range", f"bytes=0-{file_size-1}")
+        
+        try:
+            from_bytes, until_bytes_str = range_header.split("=")[1].split("-")
+            from_bytes = int(from_bytes)
+            until_bytes = int(until_bytes_str) if until_bytes_str else file_size - 1
+        except (ValueError, IndexError):
+            return web.Response(status=400, text="Invalid Range header")
+
+        if from_bytes >= file_size or until_bytes >= file_size or from_bytes > until_bytes:
+            return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+        req_length = until_bytes - from_bytes + 1
+        
+        response = web.StreamResponse(
+            status=206, # Always partial content
+            headers={
+                "Content-Type": file_prop.mime_type or "application/octet-stream",
+                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+                "Content-Length": str(req_length),
+                "Accept-Ranges": "bytes",
+                "Content-Disposition": f'inline; filename="{file_prop.file_name}"'
+            }
+        )
+        await response.prepare(request)
+        
+        # Start the background producer task
+        producer_task = asyncio.create_task(
+            self._producer(response, file_prop, from_bytes, until_bytes)
+        )
+        
+        try:
+            # This will wait until the response is finished or cancelled
+            await response.wait()
+        except asyncio.CancelledError:
+            # The client closed the connection, so we stop the producer
+            logger.warning("Client connection closed. Cancelling producer task.")
+            producer_task.cancel()
+        
+        # Wait for the producer to finish its cleanup
+        await producer_task
+        
+        return response
 
     async def _get_media_session(self, dc_id: int):
         session = self.client.media_sessions.get(dc_id)
@@ -43,87 +150,6 @@ class ByteStreamer:
                  await session.start()
             self.client.media_sessions[dc_id] = session
         return session
-        
-    # --- MODIFIED: stream_media logic is now more robust against LIMIT_INVALID ---
-    async def stream_media(self, request, message_id: int):
-        try:
-            file_prop = await self.get_file_properties(message_id)
-        except ValueError as e:
-            logger.error(f"Configuration error during streaming: {e}")
-            return web.Response(status=500, text=str(e))
-        
-        file_size = file_prop.file_size
-        range_header = request.headers.get("Range", f"bytes=0-{file_size-1}")
-        
-        try:
-            from_bytes, until_bytes = (int(x) for x in range_header.split("=")[1].split("-"))
-        except (ValueError, IndexError):
-            from_bytes, until_bytes = 0, file_size - 1
-
-        if from_bytes > until_bytes or from_bytes < 0 or until_bytes >= file_size:
-            return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
-
-        # Use a chunk size that is a multiple of 1024*4 (Telegram's block size)
-        chunk_size = 1024 * 1024  # 1MB
-        req_length = until_bytes - from_bytes + 1
-        
-        response = web.StreamResponse(
-            status=206 if from_bytes != 0 else 200,
-            headers={
-                "Content-Type": file_prop.mime_type or "application/octet-stream",
-                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-                "Content-Length": str(req_length),
-                "Content-Disposition": f'attachment; filename="{file_prop.file_name}"' if not str(file_prop.mime_type).startswith("video/") else "inline",
-                "Accept-Ranges": "bytes",
-            }
-        )
-        await response.prepare(request)
-
-        media_session = await self._get_media_session(file_prop.dc_id)
-        location = self._get_input_location(file_prop)
-        
-        offset = from_bytes - (from_bytes % 4096) # Align offset to 4096 bytes
-        first_part_cut = from_bytes - offset
-        bytes_to_yield = req_length
-
-        try:
-            while bytes_to_yield > 0:
-                # Always request a full, valid chunk size
-                limit = chunk_size
-                
-                chunk = await media_session.invoke(
-                    functions.upload.GetFile(location=location, offset=offset, limit=limit)
-                )
-
-                if not isinstance(chunk, types.upload.File):
-                    break
-
-                # Slice the data to get the exact part we need
-                if first_part_cut > 0:
-                    output_data = chunk.bytes[first_part_cut:]
-                    first_part_cut = 0 # This is only for the first chunk
-                else:
-                    output_data = chunk.bytes
-                
-                # Trim the last chunk to the exact size
-                if len(output_data) > bytes_to_yield:
-                    output_data = output_data[:bytes_to_yield]
-                
-                await response.write(output_data)
-
-                bytes_to_yield -= len(output_data)
-                offset += limit
-
-        except LimitInvalid:
-            logger.warning("LimitInvalid received despite fix. This might be a temporary Telegram issue.")
-        except (ConnectionError, asyncio.TimeoutError):
-            logger.warning("Client connection closed during streaming.")
-        except Exception as e:
-            logger.error(f"Error while streaming: {e}", exc_info=True)
-        finally:
-            await response.write_eof()
-            return response
-    # --- END MODIFIED ---
             
     @staticmethod
     def _get_input_location(file_id: FileId):
