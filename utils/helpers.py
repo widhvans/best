@@ -12,9 +12,14 @@ logger = logging.getLogger(__name__)
 
 FILES_PER_POST = 20
 
+# --- UPGRADED: Channel accessibility check now handles all exceptions ---
 async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
-    """Checks if a channel is accessible. If not, notifies the user and removes it from DB."""
+    """
+    Checks if a channel is accessible. If not, notifies the user and removes it from DB.
+    Returns True if channel is valid, False otherwise.
+    """
     try:
+        # A lightweight check to see if the bot is in the channel.
         await client.get_chat_member(channel_id, "me")
         return True
     except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
@@ -24,10 +29,11 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
             channel_name = f"**{chat.title}** (`{channel_id}`)"
         except Exception:
             pass
+
         error_text = (
             f"⚠️ **Channel Inaccessible**\n\n"
             f"Your {channel_type.title()} Channel {channel_name} is no longer accessible. "
-            f"The bot may have been kicked, or the channel was deleted, or it lost permissions.\n\n"
+            f"The bot may have been kicked, the channel was deleted, or it lost permissions.\n\n"
             f"This channel has been automatically removed from your settings to prevent further errors."
         )
         try:
@@ -41,122 +47,78 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
         return False
 
+
 def calculate_title_similarity(title1: str, title2: str) -> float:
-    """Calculates the similarity between two titles using a more advanced ratio."""
-    # Using token_set_ratio is better for matching titles with different episode names/extra words
-    return fuzz.token_set_ratio(title1, title2)
+    return fuzz.token_sort_ratio(title1, title2) / 100.0
 
 def clean_filename(name: str):
-    """
-    The new 'Deep Filename Analysis' engine. It aggressively cleans filenames
-    to extract the core movie or series title.
-    """
-    if not name:
-        return "Untitled", None
-
-    # Make a copy to preserve original name for fallback
-    original_name = name
-    
-    # 1. Remove file extension
-    name = re.sub(r'\.\w+$', '', name)
-    
-    # 2. Replace dots, underscores with spaces
-    name = re.sub(r'[\._]', ' ', name)
-    
-    # 3. Extract year and remove it
-    year_match = re.search(r'\b(19|20)\d{2}\b', name)
+    if not name: return "Untitled", None
+    cleaned_name = re.sub(r'\.\w+$', '', name)
+    cleaned_name = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', cleaned_name)
+    cleaned_name = re.sub(r'[\._\-\|*&^%$#@!()]', ' ', cleaned_name)
+    cleaned_name = re.sub(r'[^A-Za-z0-9 ]', '', cleaned_name)
+    year_match = re.search(r'\b(19|20)\d{2}\b', cleaned_name)
     year = year_match.group(0) if year_match else None
-    if year:
-        name = name.replace(year, '')
-        
-    # 4. Remove content in brackets
-    name = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', name)
-    
-    # 5. Comprehensive regex to remove a massive list of tags in one go (case-insensitive)
-    # This covers quality, resolution, source, audio, language, codecs, release groups etc.
-    tags_regex = r"""
-    (?i)\b(?:
-    4K|2160p|1080p|720p|480p|HD|FHD|UHD|SD|
-    BluRay|Blu-Ray|BRRip|BDRip|WEB-DL|WEBDL|WEBRip|WEB|
-    HDRip|HDTV|HD-TS|HD-CAM|Telesync|TS|CAM|
-    NF|AMZN|DSNP|MAX|HULU|HBO|
-    x264|x265|h264|h265|HEVC|AVC|AV1|
-    AAC|DDP5\.1|DDP2\.0|DD5\.1|AC3|DTS-HD|DTS|
-    Hindi|English|Eng|Tamil|Telugu|Kannada|Malayalam|
-    Dual[- ]Audio|Multi[- ]Audio|
-    ESub|ESubs|Subbed|
-    S\d{1,2}E\d{1,3}|Season\s*\d{1,2}|S\d{1,2}|
-    Episode|Eps|Ep|
-    Part\s*\d|
-    Combined|Complete|
-    [a-zA-Z0-9-]*Rip|[a-zA-Z0-9-]*Rls|
-    \b\w{1,5}\d{1,3}\b # To catch other short tags with numbers
-    )\b
-    """
-    name = re.sub(tags_regex, '', name, flags=re.VERBOSE)
-    
-    # 6. Clean up remaining special characters and extra spaces
-    name = re.sub(r'[^A-Za-z0-9 ]', '', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-    
-    # 7. Fallback: If cleaning results in an empty string, use a simpler version of the original name
-    if not name:
-        name = re.sub(r'\.\w+$', '', original_name).replace(".", " ").strip()
-        year = None # Reset year if we had to fall back
-        
-    return name, year
+    if year: cleaned_name = cleaned_name.replace(year, '')
+    tags = ['1080p', '720p', '480p', '2160p', '4k', 'HD', 'FHD', 'UHD', 'BluRay', 'WEBRip', 'WEB-DL', 'HDRip', 'x264', 'x265', 'HEVC', 'AAC', 'Dual Audio', 'Hindi', 'English', 'Esubs', 'Dubbed', r'S\d+E\d+', r'S\d+', r'Season\s?\d+', r'Part\s?\d+', r'E\d+', r'EP\d+', 'COMPLETE', 'WEB-SERIES']
+    for tag in tags:
+        cleaned_name = re.sub(r'\b' + tag + r'\b', '', cleaned_name, flags=re.I)
+    final_title = re.sub(r'\s+', ' ', cleaned_name).strip()
+    return (final_title, year) if final_title else (re.sub(r'\.\w+$', '', name).replace(".", " "), None)
 
 async def create_post(client, user_id, messages):
-    """Creates post(s) with smart formatting, similarity sorting, and automatic splitting."""
     user = await get_user(user_id)
     if not user: return []
-
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
     if not first_media_obj: return [] 
     primary_title, year = clean_filename(first_media_obj.file_name)
-    
-    # Sort messages naturally by filename to ensure S01E01 comes before S01E02
-    messages.sort(key=lambda m: natural_sort_key(getattr(m, m.media.value, type('o', (), {'file_name': ''})()).file_name or ''))
-    
+    def similarity_sorter(msg):
+        media_obj = getattr(msg, msg.media.value, None)
+        if not media_obj: return (1.0, "")
+        title, _ = clean_filename(media_obj.file_name)
+        similarity_score = 1.0 - calculate_title_similarity(primary_title, title)
+        natural_key = natural_sort_key(media_obj.file_name)
+        return (similarity_score, natural_key)
+    messages.sort(key=similarity_sorter)
     base_caption_header = f"🎬 **{primary_title} {f'({year})' if year else ''}**"
     post_poster = await get_poster(primary_title, year) if user.get('show_poster', True) else None
-    
     footer_buttons = user.get('footer_buttons', [])
     footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
-    
     if len(messages) == 1:
         media = getattr(messages[0], messages[0].media.value, None)
         if not media: return []
-        
+        file_label, _ = clean_filename(media.file_name)
         link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
-        caption_body = f"📁 `{media.file_name}` ({format_bytes(media.file_size)})\n\n[🔗 Click Here to Get File]({link})"
+        caption_body = f"📁 `{file_label or media.file_name}` ({format_bytes(media.file_size)})\n\n[🔗 Click Here to Get File]({link})"
         return [(post_poster, f"{base_caption_header}\n\n{caption_body}", footer_keyboard)]
-    
     else:
         posts, total = [], len(messages)
         num_posts = (total + FILES_PER_POST - 1) // FILES_PER_POST
         for i in range(num_posts):
             chunk = messages[i*FILES_PER_POST:(i+1)*FILES_PER_POST]
             header = f"{base_caption_header} (Part {i+1}/{num_posts})" if num_posts > 1 else base_caption_header
-            
             links = []
             for m in chunk:
                 media = getattr(m, m.media.value, None)
                 if not media: continue
-                
+                label, _ = clean_filename(media.file_name)
                 link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
-                links.append(f"📁 `{media.file_name}` - [Click Here]({link})")
-            
+                links.append(f"📁 `{label or media.file_name}` - [Click Here]({link})")
             final_caption = f"{header}\n\n" + "\n\n".join(links)
             posts.append((post_poster, final_caption, footer_keyboard))
         return posts
 
 async def get_main_menu(user_id):
+    """
+    Generates the main settings menu text and keyboard with the new layout.
+    Returns a tuple: (menu_text, keyboard_markup)
+    """
     user_settings = await get_user(user_id)
     if not user_settings: 
         return "Could not find your settings.", InlineKeyboardMarkup([])
 
     menu_text = "⚙️ **Bot Settings**\n\nChoose an option below to configure the bot."
+
     shortener_text = "⚙️ Shortener Settings" if user_settings.get('shortener_url') else "🔗 Set Shortener"
     
     if user_settings.get('fsub_channel'):
@@ -179,6 +141,7 @@ async def get_main_menu(user_id):
         buttons.append([InlineKeyboardButton("⚠️ Reset Files DB", callback_data="reset_db_prompt")])
 
     keyboard = InlineKeyboardMarkup(buttons)
+    
     return menu_text, keyboard
 
 def go_back_button(user_id):
