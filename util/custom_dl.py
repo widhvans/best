@@ -32,7 +32,6 @@ class ByteStreamer:
         setattr(file_id, "file_name", media.file_name)
         return file_id
 
-    # --- NEW: Asynchronous Producer to pre-fetch chunks from Telegram ---
     async def _producer(
         self,
         response: web.StreamResponse,
@@ -40,10 +39,6 @@ class ByteStreamer:
         from_bytes: int,
         until_bytes: int,
     ):
-        """
-        This function runs in the background, continuously fetching chunks
-        from Telegram and putting them into the response buffer.
-        """
         chunk_size = 1024 * 1024  # 1MB
         offset = from_bytes - (from_bytes % 4096)
         
@@ -51,9 +46,10 @@ class ByteStreamer:
         location = self._get_input_location(file_prop)
         
         try:
-            while offset < until_bytes:
-                # Ensure the response is still writable
-                if response.is_eof():
+            while offset <= until_bytes:
+                # --- FIX: Use response.closed to check connection ---
+                if response.closed:
+                    logger.warning("Producer detected closed connection. Stopping download.")
                     break
                 
                 limit = chunk_size
@@ -65,27 +61,20 @@ class ByteStreamer:
                         await response.write(chunk.bytes)
                         offset += limit
                     else:
-                        break # End of file or error
+                        break
                 except LimitInvalid:
-                    # This should be rare with the fixed limit, but handle it
                     logger.warning("Received LimitInvalid from Telegram, retrying with smaller chunk.")
                     await asyncio.sleep(0.5)
                     continue
                 except Exception:
-                    # If any other error, stop the producer
                     logger.exception("Producer failed to get chunk from Telegram.")
                     break
         except (asyncio.CancelledError, ConnectionResetError):
             logger.warning("Producer task cancelled or connection reset.")
         finally:
-            # Signal that we are done writing
             await response.write_eof()
 
     async def stream_media(self, request, message_id: int):
-        """
-        Sets up the streaming response and starts the producer task.
-        This function itself does not stream, it manages the process.
-        """
         try:
             file_prop = await self.get_file_properties(message_id)
         except ValueError as e:
@@ -96,8 +85,8 @@ class ByteStreamer:
         range_header = request.headers.get("Range", f"bytes=0-{file_size-1}")
         
         try:
-            from_bytes, until_bytes_str = range_header.split("=")[1].split("-")
-            from_bytes = int(from_bytes)
+            from_bytes_str, until_bytes_str = range_header.split("=")[1].split("-")
+            from_bytes = int(from_bytes_str)
             until_bytes = int(until_bytes_str) if until_bytes_str else file_size - 1
         except (ValueError, IndexError):
             return web.Response(status=400, text="Invalid Range header")
@@ -108,7 +97,7 @@ class ByteStreamer:
         req_length = until_bytes - from_bytes + 1
         
         response = web.StreamResponse(
-            status=206, # Always partial content
+            status=206,
             headers={
                 "Content-Type": file_prop.mime_type or "application/octet-stream",
                 "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
@@ -119,21 +108,20 @@ class ByteStreamer:
         )
         await response.prepare(request)
         
-        # Start the background producer task
         producer_task = asyncio.create_task(
             self._producer(response, file_prop, from_bytes, until_bytes)
         )
         
         try:
-            # This will wait until the response is finished or cancelled
             await response.wait()
-        except asyncio.CancelledError:
-            # The client closed the connection, so we stop the producer
+        except (asyncio.CancelledError, ConnectionResetError):
             logger.warning("Client connection closed. Cancelling producer task.")
             producer_task.cancel()
         
-        # Wait for the producer to finish its cleanup
-        await producer_task
+        try:
+            await producer_task
+        except asyncio.CancelledError:
+            pass # Task was cancelled as expected
         
         return response
 
