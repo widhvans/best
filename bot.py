@@ -47,11 +47,6 @@ class Bot(Client):
         self.stream_channel_id = None
         self.file_queue = asyncio.Queue()
         self.open_batches = {}
-        self.notification_flags = {}
-        self.notification_timers = {}
-        
-        self.media_cache = {}
-        self.cache_lock = asyncio.Lock()
         
         self.vps_ip = Config.VPS_IP
         self.vps_port = Config.VPS_PORT
@@ -63,7 +58,6 @@ class Bot(Client):
         self.web_app.router.add_get("/get/{file_unique_id}", handle_redirect)
         self.web_app.add_routes(stream_routes)
         
-        # DeprecationWarning fix: aiohttp ke modern AppRunner API ka istemal
         self.web_runner = web.AppRunner(self.web_app)
         await self.web_runner.setup()
         
@@ -71,12 +65,8 @@ class Bot(Client):
         
         await site.start()
         logger.info(f"Web server started at http://{self.vps_ip}:{self.vps_port}")
-    
-    # Baaki ke functions mein koi badlav nahi hai...
-    def _reset_notification_flag(self, channel_id):
-        self.notification_flags[channel_id] = False
-        logger.info(f"Notification flag reset for channel {channel_id}.")
 
+    # Baaki ke functions mein koi badlav nahi hai
     async def _finalize_batch(self, user_id, batch_key):
         notification_messages = []
         try:
@@ -112,8 +102,6 @@ class Bot(Client):
         except Exception as e: 
             logger.exception(f"Error finalizing batch {batch_key}: {e}")
         finally:
-            for sent_msg in notification_messages:
-                await self.send_with_protection(sent_msg.delete)
             if user_id in self.open_batches and not self.open_batches[user_id]:
                 del self.open_batches[user_id]
 
