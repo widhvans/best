@@ -1,3 +1,5 @@
+# config.py (Full Updated Code)
+
 import os
 
 class Config:
@@ -19,8 +21,6 @@ class Config:
     TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "5a318417c7f4a722afd9d71df548877b")
     
     # --- Your VPS IP Address and Port for the Web Server ---
-    # The domain/IP where your bot's web server will run.
-    # DO NOT include http://
     VPS_IP = os.environ.get("VPS_IP", "65.21.183.36")
     
     # Port for the web server (both redirect and streaming)
@@ -28,3 +28,9 @@ class Config:
     
     # The name of the file that stores your bot's username (for the redirector)
     BOT_USERNAME_FILE = "bot_username.txt"
+    
+    # ================================================================= #
+    # VVVVVV YAHAN PAR NAYA TUTORIAL LINK ADD KIYA GAYA HAI VVVVVV #
+    # ================================================================= #
+    # Yahan apna tutorial video ya channel ka link daalein
+    TUTORIAL_URL = os.environ.get("TUTORIAL_URL", "https://t.me/your_tutorial_link_here")
