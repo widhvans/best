@@ -1,6 +1,7 @@
 import math
 import asyncio
 import logging
+from aiohttp import web  # <-- FIX: Added the missing import
 from pyrogram import Client
 from pyrogram.session import Session, Auth
 from pyrogram.errors import AuthBytesInvalid, FileIdInvalid
@@ -13,16 +14,12 @@ class ByteStreamer:
     def __init__(self, client: Client):
         self.client: Client = client
 
-    # --- MODIFIED: get_file_properties now uses the Owner DB as a fallback ---
     async def get_file_properties(self, message_id: int):
         """Fetches file properties from the stream channel, with Owner DB as a fallback."""
-        
-        # Determine which channel to use for streaming
         stream_channel = self.client.stream_channel_id
         if not stream_channel:
             stream_channel = self.client.owner_db_channel_id
 
-        # If neither is configured, then it's a critical error.
         if not stream_channel:
             raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
         
@@ -33,16 +30,13 @@ class ByteStreamer:
         media = getattr(message, message.media.value)
         file_id = FileId.decode(media.file_id)
         
-        # Add necessary properties to the FileId object
         setattr(file_id, "file_size", media.file_size)
         setattr(file_id, "mime_type", media.mime_type)
         setattr(file_id, "file_name", media.file_name)
         
         return file_id
-    # --- END MODIFIED ---
 
     async def _get_media_session(self, dc_id: int):
-        """Gets or creates a media session for the given DC."""
         session = self.client.media_sessions.get(dc_id)
         if session is None:
             if dc_id != await self.client.storage.dc_id():
@@ -57,7 +51,6 @@ class ByteStreamer:
         return session
 
     async def stream_media(self, request, message_id: int):
-        """Stream the media content with support for range requests."""
         try:
             file_prop = await self.get_file_properties(message_id)
         except ValueError as e:
