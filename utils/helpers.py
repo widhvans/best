@@ -1,7 +1,7 @@
 import re
 import base64
 import logging
-import PTN  # Iska istemal details nikalne ke liye hoga
+import PTN
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate
 from config import Config
@@ -16,20 +16,28 @@ FILES_PER_POST = 20
 
 def clean_filename(name: str):
     """
-    Filename ko saaf karne ke liye PTN library ka istemal karta hai.
+    The definitive 'champion pro' filename cleaner.
+    1. Pre-cleans the name to help PTN.
+    2. Uses PTN for best-in-class parsing.
+    3. Has a much more robust fallback if PTN fails.
     Returns: (base_title, full_cleaned_name, year)
     """
     if not name:
         return "Untitled", "Untitled", None
 
     try:
-        parsed_info = PTN.parse(name)
-        base_title = parsed_info.get('title', '')
+        # Step 1: Pre-process the name for better PTN parsing
+        processed_name = name.replace('.', ' ').replace('_', ' ')
+        
+        # Step 2: Parse with PTN
+        parsed_info = PTN.parse(processed_name)
+        base_title = parsed_info.get('title')
         year = str(parsed_info.get('year')) if parsed_info.get('year') else None
 
         if not base_title:
-            raise ValueError("PTN did not find a title.")
+            raise ValueError("PTN did not find a title, triggering fallback.")
 
+        # Step 3: Format for TV Shows
         if 'season' in parsed_info and 'episode' in parsed_info:
             season = parsed_info.get('season')
             episode = parsed_info.get('episode')
@@ -39,23 +47,37 @@ def clean_filename(name: str):
                 full_title = f"{full_title} - {episode_name}"
             return base_title.strip(), full_title.strip(), year
 
+        # Step 4: Format for Movies
         return base_title.strip(), base_title.strip(), year
 
     except Exception:
-        logger.warning(f"PTN failed for '{name}', using the simple regex fallback.")
-        text = re.sub(r'[\(\[].*?[\)\]]', '', name)
-        match = re.split(r'720p|1080p|4k|web-dl|bluray|hdrip|webrip', text, flags=re.IGNORECASE)
-        cleaned_title = match[0].replace('.', ' ').replace('_', ' ').strip() if match else text.strip()
-        return cleaned_title, cleaned_title, None
+        # ================================================================= #
+        # VVVVVV NAYA, SUPER-SMART FALLBACK LOGIC VVVVVV #
+        # ================================================================= #
+        logger.warning(f"PTN failed for '{name}'. Using the robust regex fallback.")
+        
+        # Original filename se extension hatayein
+        fallback_name = re.sub(r'\.[^.]*$', '', name)
+        # Separators (dots, underscores) ko space se replace karein
+        fallback_name = fallback_name.replace('.', ' ').replace('_', ' ').strip()
+        # Saal (e.g., (2024)) ko hatayein
+        fallback_name = re.sub(r'\s*\(\d{4}\)\s*', '', fallback_name).strip()
+        # Brackets (e.g., [1080p]) ko hatayein
+        fallback_name = re.sub(r'\s*\[.*?\]\s*', '', fallback_name).strip()
+
+        # Saal ya quality tag ke pehle sign par naam ko split karein
+        match = re.split(r'\b(19|20)\d{2}\b|720p|1080p|4k|webrip|web-dl|bluray|hdrip', fallback_name, maxsplit=1, flags=re.I)
+        final_title = match[0].strip()
+        
+        # Agar title khaali ho jaye to fallback_name istemal karein
+        if not final_title:
+            final_title = fallback_name
+
+        # Fallback mein, base aur full title ek hi honge aur saal None hoga
+        return final_title, final_title, None
 
 
 async def create_post(client, user_id, messages):
-    """
-    Naye logic ke saath post banata hai:
-    - Header mein sirf base title.
-    - File links mein poora saaf naam.
-    - File ke naam ke neeche filtered technical details.
-    """
     user = await get_user(user_id)
     if not user: return []
     first_media_obj = getattr(messages[0], messages[0].media.value, None)
@@ -88,17 +110,10 @@ async def create_post(client, user_id, messages):
             media = getattr(m, m.media.value, None)
             if not media: continue
             
-            # Step 1: File ka saaf naam nikalein
             _, full_cleaned_label, _ = clean_filename(media.file_name)
             
-            # ================================================================= #
-            # VVVVVV YAHAN PAR NAYA LOGIC ADD KIYA GAYA HAI VVVVVV #
-            # ================================================================= #
-
-            # Step 2: PTN se saari technical details parse karein
             parsed_info = PTN.parse(media.file_name)
             
-            # Step 3: Dikhane ke liye extra tags ki list banayein
             extra_tags = [
                 parsed_info.get('resolution'),
                 parsed_info.get('quality'),
@@ -106,15 +121,12 @@ async def create_post(client, user_id, messages):
                 parsed_info.get('codec'),
                 parsed_info.get('group')
             ]
-            # Jo tags mile hain, unhe saaf-suthre format mein jodein
             filtered_text = " | ".join(tag for tag in extra_tags if tag)
 
-            # Step 4: Link aur file entry banayein
             link = f"http://{Config.VPS_IP}:{Config.VPS_PORT}/get/{media.file_unique_id}"
             
             file_entry = f"📁 `{full_cleaned_label or media.file_name}` - [Click Here to Get File]({link})"
             
-            # Agar filtered text mila hai, to use agli line mein add karein
             if filtered_text:
                 file_entry += f"\n   `{filtered_text}`"
             
@@ -127,9 +139,6 @@ async def create_post(client, user_id, messages):
 
 
 def get_title_key(filename: str) -> str:
-    """
-    Files ko batch mein group karne ke liye key banata hai.
-    """
     base_title, _, _ = clean_filename(filename)
     return base_title.lower().strip()
 
