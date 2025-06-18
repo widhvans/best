@@ -10,7 +10,8 @@ from database.db import (
     get_user_file_count, add_footer_button, remove_footer_button,
     get_all_user_files, get_paginated_files, search_user_files
 )
-from utils.helpers import go_back_button, get_main_menu, create_post, clean_filename, calculate_title_similarity, notify_and_remove_invalid_channel
+# --- FIXED: Removed the unused import of 'calculate_title_similarity' ---
+from utils.helpers import go_back_button, get_main_menu, create_post, clean_filename, notify_and_remove_invalid_channel
 
 logger = logging.getLogger(__name__)
 ACTIVE_BACKUP_TASKS = set()
@@ -62,6 +63,7 @@ async def get_shortener_menu_parts(user_id):
     buttons.append([go_back_button(user_id).inline_keyboard[0][0]])
     return text, InlineKeyboardMarkup(buttons)
 
+
 async def get_poster_menu_parts(user_id):
     user = await get_user(user_id)
     is_enabled = user.get('show_poster', True)
@@ -76,7 +78,6 @@ async def get_fsub_menu_parts(client, user_id):
     fsub_ch = user.get('fsub_channel')
     text = "**📢 FSub Settings**\n\n"
     if fsub_ch:
-        # We use the universal checker here too for consistency
         is_valid = await notify_and_remove_invalid_channel(client, user_id, fsub_ch, "FSub")
         if is_valid:
             try:
@@ -344,20 +345,17 @@ async def remove_footer_handler(client, query):
     await query.answer("Button removed!", show_alert=True)
     await manage_footer_handler(client, query)
 
-# --- UPDATED: Handler now checks channels when the menu is opened ---
 @Client.on_callback_query(filters.regex(r"manage_(post|db)_ch"))
 async def manage_channels_handler(client, query):
     user_id, ch_type = query.from_user.id, query.data.split("_")[1]
     ch_type_key, ch_type_name = f"{ch_type}_channels", "Post" if ch_type == "post" else "Database"
     
-    # Get a fresh copy of the channels after potentially being modified by the check
     user_data = await get_user(user_id)
     channels = user_data.get(ch_type_key, [])
     
     text = f"**Manage Your {ch_type_name} Channels**\n\n"
     buttons = []
     
-    # Create a list of valid channels first
     valid_channels = []
     if channels:
         for ch_id in channels:
@@ -371,7 +369,6 @@ async def manage_channels_handler(client, query):
                 chat = await client.get_chat(ch_id)
                 buttons.append([InlineKeyboardButton(f"❌ {chat.title}", callback_data=f"rm_{ch_type}_{ch_id}")])
             except:
-                # This case is unlikely now but good for safety
                 buttons.append([InlineKeyboardButton(f"❌ Unavailable ({ch_id})", callback_data=f"rm_{ch_type}_{ch_id}")])
     else:
         text += "You haven't added any channels yet."
@@ -442,7 +439,7 @@ async def set_other_links_handler(client, query):
         if action == "fsub":
             if not response.forward_from_chat: return await response.reply("Not a valid forwarded message.", reply_markup=go_back_button(user_id))
             value = response.forward_from_chat.id
-        else: # action == "download"
+        else:
             value = response.text.strip()
             if not value.startswith(("http://", "https://")):
                 value = "https://" + value
