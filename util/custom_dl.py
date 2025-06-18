@@ -78,12 +78,12 @@ class ByteStreamer:
                     os.rename(temp_file_path, file_path)
                     logger.info(f"Caching complete for message_id: {message_id}")
 
-                except (ConnectionResetError, asyncio.CancelledError):
-                    logger.warning(f"Client disconnected during initial stream/cache for message_id: {message_id}.")
+                except (ConnectionResetError, asyncio.CancelledError, BrokenPipeError):
+                    logger.warning(f"Client disconnected during stream/cache for message_id: {message_id}. This is normal.")
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                 except Exception as e:
-                    logger.exception(f"Error during stream/cache for message_id {message_id}: {e}")
+                    logger.exception(f"An unexpected error occurred during stream/cache for message_id {message_id}: {e}")
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                 
