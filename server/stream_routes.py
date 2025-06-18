@@ -1,4 +1,4 @@
-# server/stream_routes.py (FULL REPLACEMENT - Final Stable Version)
+# server/stream_routes.py (The Ultimate Speed & Seeking Fix)
 
 import logging
 import asyncio
@@ -40,63 +40,92 @@ async def watch_handler(request: web.Request):
 
 async def stream_or_download(request: web.Request, disposition: str):
     """
-    Handles streaming by piping data directly from Telegram to the client.
-    This method is optimized for stability and speed, avoiding disk I/O and complex session handling.
+    Handles streaming and downloading with full support for HTTP Range Requests,
+    enabling seeking and faster buffering in external players.
     """
     try:
         message_id = int(request.match_info.get("message_id"))
         bot = request.app['bot']
 
-        # Stream channel ya owner DB channel se chat_id lein
         chat_id = bot.stream_channel_id or bot.owner_db_channel_id
         if not chat_id:
-            raise ValueError("Streaming channels not configured on the bot.")
+            raise ValueError("Streaming channels not configured.")
 
-        # Telegram se message object prapt karein
         message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
 
         if not message or not message.media:
-            return web.Response(text="File not found or has no media.", status=404)
+            return web.Response(status=404, text="File not found or has no media.")
 
         media = getattr(message, message.media.value)
         file_name = getattr(media, "file_name", "unknown.dat")
-        file_size = getattr(media, "file_size", 0)
+        file_size = int(getattr(media, "file_size", 0))
 
-        headers = {
-            "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
-            "Content-Disposition": f'{disposition}; filename="{file_name}"',
-            "Content-Length": str(file_size)
-        }
+        # HTTP Range Requests ko handle karein
+        range_header = request.headers.get("Range")
+        if range_header:
+            from_bytes, until_bytes = 0, file_size - 1
+            try:
+                range_bytes = range_header.split("=")[1]
+                from_bytes = int(range_bytes.split("-")[0])
+                if len(range_bytes.split("-")) > 1 and range_bytes.split("-")[1]:
+                    until_bytes = int(range_bytes.split("-")[1])
+            except (ValueError, IndexError):
+                return web.Response(status=400, text="Invalid Range header.")
+
+            if (from_bytes > file_size) or (until_bytes >= file_size):
+                return web.Response(status=416)  # Range Not Satisfiable
+
+            chunk_size = until_bytes - from_bytes + 1
+            offset = from_bytes
+            status = 206  # Partial Content
+
+            headers = {
+                "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                "Content-Length": str(chunk_size),
+                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+                "Accept-Ranges": "bytes"
+            }
+        else:
+            # Agar Range request nahi hai, to poori file bhejein
+            headers = {
+                "Content-Type": getattr(media, "mime_type", "application/octet-stream"),
+                "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                "Content-Length": str(file_size)
+            }
+            offset = 0
+            status = 200  # OK
         
-        response = web.StreamResponse(status=200, headers=headers)
+        response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
         
-        # Seedhe Telegram se user tak stream karein, bina disk aur manual sessions ke
-        async for chunk in bot.stream_media(message):
+        # Pyrogram ke stable stream_media ko calculated offset ke saath istemal karein
+        streamer = bot.stream_media(message, offset=offset)
+        
+        async for chunk in streamer:
             try:
                 await response.write(chunk)
             except (ConnectionError, asyncio.CancelledError):
                 logger.warning(f"Client disconnected for message {message_id}. Stopping stream.")
-                # Client chala gaya, isliye stream band kar dein
                 break
         
         return response
 
     except (FileIdInvalid, ValueError) as e:
         logger.error(f"File ID or configuration error for stream request: {e}")
-        return web.Response(text="File not found, link may have expired, or bot is misconfigured.", status=404)
+        return web.Response(status=404, text="File not found or link expired.")
     except Exception:
         logger.critical("FATAL: Unexpected error in stream/download handler", exc_info=True)
-        return web.Response(text="Internal Server Error", status=500)
+        return web.Response(status=500, text="Internal Server Error")
 
 
 @routes.get("/stream/{message_id:\\d+}", allow_head=True)
 async def stream_handler(request: web.Request):
-    """Handler for inline video playback."""
+    """Handler for inline video playback with seeking support."""
     return await stream_or_download(request, "inline")
 
 
 @routes.get("/download/{message_id:\\d+}", allow_head=True)
 async def download_handler(request: web.Request):
-    """Handler for direct file downloads."""
+    """Handler for direct file downloads with seeking/resume support."""
     return await stream_or_download(request, "attachment")
