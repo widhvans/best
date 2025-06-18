@@ -13,25 +13,19 @@ logger = logging.getLogger(__name__)
 FILES_PER_POST = 20
 
 async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel_type):
-    """
-    Checks if a channel is accessible. If not, notifies the user and removes it from DB.
-    Returns True if channel is valid, False otherwise.
-    """
     try:
         await client.get_chat_member(channel_id, "me")
         return True
-    except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate) as e:
+    except (UserNotParticipant, ChatAdminRequired, ChannelInvalid, PeerIdInvalid, ChannelPrivate):
         channel_name = f"`{channel_id}`"
         try:
             chat = await client.get_chat(channel_id)
             channel_name = f"**{chat.title}** (`{channel_id}`)"
-        except Exception:
-            pass
-
+        except Exception: pass
         error_text = (
             f"⚠️ **Channel Inaccessible**\n\n"
             f"Your {channel_type.title()} Channel {channel_name} is no longer accessible. "
-            f"The bot may have been kicked, the channel was deleted, or it lost permissions.\n\n"
+            f"The bot may have been kicked, or the channel was deleted.\n\n"
             f"This channel has been automatically removed from your settings to prevent further errors."
         )
         try:
@@ -45,65 +39,95 @@ async def notify_and_remove_invalid_channel(client, user_id, channel_id, channel
         logger.error(f"An unexpected error occurred while checking channel {channel_id}: {e}")
         return False
 
-# --- NEW: Function to generate a consistent key for batching ---
-def get_title_key(filename: str, num_words: int = 3) -> str:
-    """
-    Generates a key from the first N significant words of a filename
-    to use for batching.
-    """
-    # First, get the cleaned title from the existing function
-    cleaned_title, _ = clean_filename(filename)
-    
-    # Split into words and take the first N
-    words = cleaned_title.split()
-    # For series like "S01E01", take more words to be specific
-    if any(re.match(r's\d+', word, re.I) for word in words):
-        num_words = 4
-
-    key_words = words[:num_words]
-    
-    # Return the key as a lowercase string
-    return " ".join(key_words).lower()
-
-
-def calculate_title_similarity(title1: str, title2: str) -> float:
-    return fuzz.token_sort_ratio(title1, title2) / 100.0
-
 def clean_filename(name: str):
     if not name: return "Untitled", None
     cleaned_name = re.sub(r'\.\w+$', '', name)
     cleaned_name = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', cleaned_name)
     cleaned_name = re.sub(r'[\._\-\|*&^%$#@!()]', ' ', cleaned_name)
+    cleaned_name = re.sub(r'\b\d{4}\b', '', cleaned_name) # Remove year early
     cleaned_name = re.sub(r'[^A-Za-z0-9 ]', '', cleaned_name)
-    year_match = re.search(r'\b(19|20)\d{2}\b', cleaned_name)
+    year_match = re.search(r'\b(19|20)\d{2}\b', name) # Get year from original name
     year = year_match.group(0) if year_match else None
-    if year: cleaned_name = cleaned_name.replace(year, '')
-    tags = ['1080p', '720p', '480p', '2160p', '4k', 'HD', 'FHD', 'UHD', 'BluRay', 'WEBRip', 'WEB-DL', 'HDRip', 'x264', 'x265', 'HEVC', 'AAC', 'Dual Audio', 'Hindi', 'English', 'Esubs', 'Dubbed', r'S\d+E\d+', r'S\d+', r'Season\s?\d+', r'Part\s?\d+', r'E\d+', r'EP\d+', 'COMPLETE', 'WEB-SERIES']
+    tags = ['1080p', '720p', '480p', '2160p', '4k', 'HD', 'FHD', 'UHD', 'BluRay', 'WEBRip', 'WEB-DL', 'HDRip', 'x264', 'x265', 'HEVC', 'AAC', 'Dual Audio', 'Hindi', 'English', 'Esubs', 'Dubbed', r'S\d+E\d+', r'S\d+', r'Season\s?\d+', r'Part\s?\d+', r'E\d+', r'EP\d+', 'COMPLETE', 'WEB-SERIES', 'NF', 'AMZN', 'DDP5', 'ESub', 'VP9', 'AV1', 'MULTi', 'COMBINED']
     for tag in tags:
         cleaned_name = re.sub(r'\b' + tag + r'\b', '', cleaned_name, flags=re.I)
     final_title = re.sub(r'\s+', ' ', cleaned_name).strip()
     return (final_title, year) if final_title else (re.sub(r'\.\w+$', '', name).replace(".", " "), None)
 
-async def create_post(client, user_id, messages):
-    user = await get_user(user_id)
-    if not user: return []
-    first_media_obj = getattr(messages[0], messages[0].media.value, None)
-    if not first_media_obj: return [] 
-    primary_title, year = clean_filename(first_media_obj.file_name)
+# --- NEW: Advanced Batch Key Generation ---
+def generate_batch_key(filename: str) -> tuple:
+    """
+    Generates a sophisticated key for grouping files based on the most
+    significant words in the filename.
+    """
+    cleaned_title, _ = clean_filename(filename)
+    if not cleaned_title:
+        return None
+
+    words = cleaned_title.split()
+    # Filter out short, insignificant words (e.g., 'a', 'is', '1', 'it')
+    significant_words = [word for word in words if len(word) > 2 and not word.isdigit()]
     
-    def similarity_sorter(msg):
-        media_obj = getattr(msg, msg.media.value, None)
-        if not media_obj: return (1.0, "")
-        title, _ = clean_filename(media_obj.file_name)
-        similarity_score = 1.0 - calculate_title_similarity(primary_title, title)
-        natural_key = natural_sort_key(media_obj.file_name)
-        return (similarity_score, natural_key)
-    messages.sort(key=similarity_sorter)
-    base_caption_header = f"🎬 **{primary_title} {f'({year})' if year else ''}**"
-    post_poster = await get_poster(primary_title, year) if user.get('show_poster', True) else None
+    # If no significant words found, fall back to first two words
+    if not significant_words:
+        significant_words = words[:2]
+        if not significant_words:
+            return None
+
+    # Sort words by length, longest first
+    significant_words.sort(key=len, reverse=True)
+    
+    # Take the top 2 longest words as the primary key components
+    # Using 2 is more stable for titles with varying secondary words.
+    key_components = significant_words[:2]
+    
+    # Sort alphabetically to ensure consistency (e.g., "Rana Naidu" and "Naidu Rana" produce the same key)
+    key_components.sort(key=str.lower)
+    
+    # The key is a tuple of the lowercase words
+    batch_key = tuple(word.lower() for word in key_components)
+    
+    return batch_key
+
+# --- UPDATED: create_post now accepts the batch key to generate a header ---
+async def create_post(client, user_id, messages, batch_key_words=None):
+    """Creates post(s) with smart formatting, sorting, and header generation."""
+    user = await get_user(user_id)
+    if not user or not messages: return []
+
+    # --- New Header Generation Logic ---
+    search_title = ""
+    search_year = None
+    if batch_key_words:
+        # Use the provided key words to create a clean, consistent header
+        header_title = " ".join(word.capitalize() for word in batch_key_words)
+        # Still get the year from the first filename for poster searching
+        _, search_year = clean_filename(getattr(messages[0], messages[0].media.value).file_name)
+        search_title = header_title
+    else:
+        # Fallback for single files or if key is not provided
+        first_media_obj = getattr(messages[0], messages[0].media.value, None)
+        if not first_media_obj: return [] 
+        header_title, search_year = clean_filename(first_media_obj.file_name)
+        search_title = header_title
+    
+    base_caption_header = f"🎬 **{header_title} {f'({search_year})' if search_year else ''}**"
+    
+    # --- The rest of the function remains the same ---
+    def natural_sort_key(s):
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s)]
+    
+    # Sort messages naturally for logical order (e.g., episode 1, 2, 10)
+    messages.sort(key=lambda m: natural_sort_key(getattr(m, m.media.value, type('obj', (object,), {'file_name': ''})()).file_name))
+    
+    post_poster = await get_poster(search_title, search_year) if user.get('show_poster', True) else None
     footer_buttons = user.get('footer_buttons', [])
     footer_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn['name'], url=btn['url'])] for btn in footer_buttons]) if footer_buttons else None
-    if len(messages) == 1:
+    
+    posts, total = [], len(messages)
+    if total == 0: return []
+
+    if total == 1:
         media = getattr(messages[0], messages[0].media.value, None)
         if not media: return []
         file_label, _ = clean_filename(media.file_name)
@@ -111,7 +135,6 @@ async def create_post(client, user_id, messages):
         caption_body = f"📁 `{file_label or media.file_name}` ({format_bytes(media.file_size)})\n\n[🔗 Click Here to Get File]({link})"
         return [(post_poster, f"{base_caption_header}\n\n{caption_body}", footer_keyboard)]
     else:
-        posts, total = [], len(messages)
         num_posts = (total + FILES_PER_POST - 1) // FILES_PER_POST
         for i in range(num_posts):
             chunk = messages[i*FILES_PER_POST:(i+1)*FILES_PER_POST]
@@ -127,6 +150,7 @@ async def create_post(client, user_id, messages):
             posts.append((post_poster, final_caption, footer_keyboard))
         return posts
 
+# The rest of helpers.py is unchanged but included for completeness
 async def get_main_menu(user_id):
     user_settings = await get_user(user_id)
     if not user_settings: 
@@ -173,6 +197,3 @@ def decode_link(encoded_text: str) -> str:
     padding = 4 - (len(encoded_text) % 4)
     encoded_text += "=" * padding
     return base64.urlsafe_b64decode(encoded_text).decode()
-
-def natural_sort_key(s):
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s)]
