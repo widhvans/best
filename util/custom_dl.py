@@ -7,6 +7,7 @@ from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FileReferenceExpired
 from aiohttp.client_exceptions import ClientConnectionResetError
+from asyncio import CancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ class ByteStreamer:
                 )
                 try:
                     await response.prepare(request)
-                except ClientConnectionResetError:
+                except (ClientConnectionResetError, ConnectionError):
                     logger.warning(f"Client disconnected before response preparation for message_id: {message_id}")
                     return response
 
@@ -79,16 +80,21 @@ class ByteStreamer:
                             try:
                                 await response.write(chunk)
                                 await cache_file.write(chunk)
-                            except ClientConnectionResetError:
+                            except (ClientConnectionResetError, ConnectionResetError, ConnectionError):
                                 logger.warning(f"Client disconnected during streaming for message_id: {message_id}")
+                                break
+                            except CancelledError:
+                                logger.warning(f"Streaming cancelled for message_id: {message_id}")
                                 break
                     
                     if os.path.exists(temp_file_path):
                         os.rename(temp_file_path, file_path)
                         logger.info(f"Caching complete for message_id: {message_id}")
+                    else:
+                        logger.warning(f"Temporary file not found after streaming for message_id: {message_id}")
 
-                except (ConnectionResetError, asyncio.CancelledError):
-                    logger.warning(f"Client disconnected during initial stream/cache for message_id: {message_id}.")
+                except (ConnectionResetError, ConnectionError, CancelledError):
+                    logger.warning(f"Client disconnected or stream cancelled during initial stream/cache for message_id: {message_id}")
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                 except Exception as e:
