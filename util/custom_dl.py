@@ -1,7 +1,8 @@
 import logging
+import asyncio
 from pyrogram import Client, raw
 from pyrogram.session import Session, Auth
-from pyrogram.errors import FileMigrate, AuthBytesInvalid
+from pyrogram.errors import FileMigrate, AuthKeyUnregistered  # Zaroori error import
 from .file_properties import get_file_properties, FileIdError
 
 logger = logging.getLogger(__name__)
@@ -24,35 +25,37 @@ class ByteStreamer:
 
     async def _get_session(self, dc_id: int):
         """
-        Gets a session from the pool or creates a new, stable one if it doesn't exist.
-        This is the core of the load-handling fix.
+        Pool se session prapt karta hai ya zaroorat padne par ek naya, stable session banata hai.
         """
         session = self.client.media_sessions.get(dc_id)
         
-        # Agar is DC ke liye session pehle se nahi hai, to hi naya banayein
         if session is None:
-            logger.info(f"Creating new, stable media session for DC {dc_id}...")
-            # Naya authorization key banayein, jo bot accounts ke liye sabse stable tareeka hai
+            logger.info(f"No cached session for DC {dc_id}. Creating a new one...")
             session = Session(
                 self.client, dc_id, await Auth(self.client, dc_id, await self.client.storage.test_mode()).create(),
                 await self.client.storage.test_mode(), is_media=True
             )
             await session.start()
-            # Naye session ko pool mein save karein taaki dobara istemal ho sake
             self.client.media_sessions[dc_id] = session
-            logger.info(f"Successfully created and cached new session for DC {dc_id}.")
+            logger.info(f"Successfully created and cached session for DC {dc_id}.")
         
         return session
 
     async def yield_file(self, file_id, offset, first_part_cut, last_part_cut, part_count, chunk_size):
-        # File ke original DC se shuru karein
-        media_session = await self._get_session(file_id.dc_id)
+        """
+        Yeh naya 'yield_file' function ab 'AuthKeyUnregistered' aur 'FileMigrate' dono ko handle kar sakta hai.
+        """
         location = self.get_location(file_id)
         current_part = 1
+        
+        # File ke original DC se shuru karein
+        dc_id = file_id.dc_id
 
         while current_part <= part_count:
+            # Har chunk ke liye session prapt karein taaki agar purana kharab ho to naya mil sake
+            media_session = await self._get_session(dc_id)
+            
             try:
-                # Sahi media session par request bhejein
                 chunk = await media_session.invoke(
                     raw.functions.upload.GetFile(
                         location=location,
@@ -63,7 +66,6 @@ class ByteStreamer:
                 )
                 
                 if isinstance(chunk, raw.types.upload.File):
-                    # Pehle aur aakhri chunk ko kaat kar bhejein
                     if current_part == 1 and part_count > 1:
                         yield chunk.bytes[first_part_cut:]
                     elif current_part == part_count and part_count > 1:
@@ -76,11 +78,23 @@ class ByteStreamer:
                 else:
                     break
             
+            # ================================================================= #
+            # VVVVVV YAHAN PAR HAI ASLI JAADU - SELF-HEALING LOGIC VVVVVV #
+            # ================================================================= #
+            
+            except AuthKeyUnregistered:
+                logger.error(f"Auth key for DC {dc_id} is unregistered. Deleting session from pool and retrying.")
+                # Kharab session ko pool se delete karein
+                if dc_id in self.client.media_sessions:
+                    del self.client.media_sessions[dc_id]
+                # Agle loop mein, _get_session function apne aap ek naya, fresh session banayega
+                continue
+            
             except FileMigrate as e:
-                logger.warning(f"File migrated to DC {e.value}. Following file to new DC...")
-                # Naye DC ke liye naya session prapt karein (ya pool se lein)
-                media_session = await self._get_session(e.value)
-                # Is chunk ko dobara naye session se try karein
+                logger.warning(f"File migrated from DC {dc_id} to {e.value}. Switching session.")
+                # Agle sabhi chunks ke liye DC ko update karein
+                dc_id = e.value
+                # Agle loop mein naye DC ke liye session banaya jayega
                 continue
             
             except Exception as e:
