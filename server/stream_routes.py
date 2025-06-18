@@ -2,7 +2,7 @@ import logging
 import asyncio
 from aiohttp import web
 from pyrogram.errors import FileIdInvalid
-#render_template ko util se import karein
+# util/render_template.py se render_page ko import karein
 from util.render_template import render_page 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ async def producer(bot, message_id):
     """
     Dedicated downloader (Producer). File download karke queue mein daalta hai.
     """
+    # producer_info ab 'stream_producers' mein message_id ke saath store hoga
     producer_info = bot.stream_producers[message_id]
     try:
         media_meta = await get_media_meta(message_id, bot)
@@ -80,7 +81,6 @@ async def watch_handler(request: web.Request):
         message_id = int(request.match_info["message_id"])
         bot = request.app['bot']
         
-        # render_page function ko call karein jo ab cache ka sahi istemal karega
         html_content = await render_page(bot, message_id)
         
         return web.Response(text=html_content, content_type='text/html')
@@ -106,31 +106,37 @@ async def stream_or_download(request: web.Request, disposition: str):
 
         producer_info = bot.stream_producers[message_id]
         
-        # Centralized function se poori details prapt karein
         media_meta = await get_media_meta(message_id, bot)
         
         headers = {
             "Content-Type": media_meta["mime_type"],
             "Content-Disposition": f'{disposition}; filename="{media_meta["file_name"]}"',
-            "Content-Length": str(media_meta["file_size"])
+            "Content-Length": str(media_meta["file_size"]),
+            "Accept-Ranges": "bytes", # Seeking ke liye zaroori
         }
         
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         
-        consumer_iterator = producer_info['queue'].__aiter__()
+        queue = producer_info['queue']
 
+        # ================================================================= #
+        # VVVVVV YAHAN PAR '_aiter_' KO SAHI TAREEKE SE REPLACE KIYA GAYA HAI VVVVVV #
+        # ================================================================= #
+        
+        # Standard aur robust tareeka queue se data nikalne ka
         while True:
+            chunk = await queue.get()
+            
+            # Agar chunk None hai, iska matlab download poora ho gaya
+            if chunk is None:
+                break
+            
             try:
-                chunk = await consumer_iterator.__anext__()
-                if chunk is None:
-                    break
                 await response.write(chunk)
                 await asyncio.sleep(0)
             except (ConnectionError, asyncio.CancelledError):
                 logger.warning(f"Consumer for message {message_id} disconnected.")
-                break
-            except StopAsyncIteration:
                 break
         
         return response
