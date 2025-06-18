@@ -1,64 +1,13 @@
+# server/stream_routes.py (The Final "Super Fix" Version)
+
 import logging
 import asyncio
 from aiohttp import web
 from pyrogram.errors import FileIdInvalid
-# util/render_template.py se render_page ko import karein
 from util.render_template import render_page 
 
 logger = logging.getLogger(__name__)
 routes = web.RouteTableDef()
-
-
-async def get_media_meta(message_id, bot):
-    """
-    Ek central function jo file ki details ko cache se laata hai ya zaroorat padne par fetch karke cache karta hai.
-    """
-    async with bot.cache_lock:
-        media_meta = bot.media_cache.get(message_id)
-        if not media_meta:
-            logger.info(f"Cache MISS for message_id: {message_id}. Fetching from Telegram.")
-            chat_id = bot.stream_channel_id or bot.owner_db_channel_id
-            if not chat_id:
-                raise ValueError("Streaming channels not configured.")
-            
-            message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
-
-            if not message or not message.media:
-                raise FileIdInvalid(f"Message {message_id} not found or has no media.")
-            
-            media = getattr(message, message.media.value)
-            media_meta = {
-                "message_object": message,
-                "file_name": getattr(media, "file_name", "unknown.dat"),
-                "file_size": int(getattr(media, "file_size", 0)),
-                "mime_type": getattr(media, "mime_type", "application/octet-stream")
-            }
-            bot.media_cache[message_id] = media_meta
-        else:
-            logger.info(f"Cache HIT for message_id: {message_id}. Using memory cache.")
-    return media_meta
-
-
-async def producer(bot, message_id):
-    """
-    Dedicated downloader (Producer). File download karke queue mein daalta hai.
-    """
-    # producer_info ab 'stream_producers' mein message_id ke saath store hoga
-    producer_info = bot.stream_producers[message_id]
-    try:
-        media_meta = await get_media_meta(message_id, bot)
-        message = media_meta["message_object"]
-        streamer = bot.stream_media(message)
-        
-        async for chunk in streamer:
-            await producer_info['queue'].put(chunk)
-            
-    except Exception as e:
-        logger.error(f"Producer for message {message_id} failed: {e}", exc_info=True)
-        await producer_info['queue'].put(None)
-    finally:
-        await producer_info['queue'].put(None)
-        logger.info(f"Producer for message {message_id} has finished.")
 
 
 @routes.get("/", allow_head=True)
@@ -80,9 +29,7 @@ async def watch_handler(request: web.Request):
     try:
         message_id = int(request.match_info["message_id"])
         bot = request.app['bot']
-        
         html_content = await render_page(bot, message_id)
-        
         return web.Response(text=html_content, content_type='text/html')
     except Exception as e:
         logger.critical(f"Unexpected error in watch handler: {e}", exc_info=True)
@@ -90,53 +37,95 @@ async def watch_handler(request: web.Request):
 
 
 async def stream_or_download(request: web.Request, disposition: str):
+    """
+    Handles streaming with full support for HTTP Range Requests,
+    enabling seeking and faster buffering in external players.
+    This is the most robust implementation for performance.
+    """
     bot = request.app['bot']
     message_id_str = request.match_info.get("message_id")
     try:
         message_id = int(message_id_str)
         
-        lock = bot.stream_locks.setdefault(message_id, asyncio.Lock())
-        
-        async with lock:
-            if message_id not in bot.stream_producers:
-                queue = asyncio.Queue()
-                task = asyncio.create_task(producer(bot, message_id))
-                bot.stream_producers[message_id] = {'task': task, 'queue': queue}
-                logger.info(f"Started new producer task for message_id: {message_id}")
+        # Metadata Caching ka istemal karein
+        async with bot.cache_lock:
+            media_meta = bot.media_cache.get(message_id)
+            if not media_meta:
+                logger.info(f"Cache MISS for message_id: {message_id}. Fetching from Telegram.")
+                chat_id = bot.stream_channel_id or bot.owner_db_channel_id
+                if not chat_id:
+                    raise ValueError("Streaming channels not configured.")
+                
+                message = await bot.get_messages(chat_id=chat_id, message_ids=message_id)
 
-        producer_info = bot.stream_producers[message_id]
+                if not message or not message.media:
+                    raise FileIdInvalid(f"Message {message_id} not found or has no media.")
+                
+                media = getattr(message, message.media.value)
+                media_meta = {
+                    "message_object": message,
+                    "file_name": getattr(media, "file_name", "unknown.dat"),
+                    "file_size": int(getattr(media, "file_size", 0)),
+                    "mime_type": getattr(media, "mime_type", "application/octet-stream")
+                }
+                bot.media_cache[message_id] = media_meta
+            else:
+                logger.info(f"Cache HIT for message_id: {message_id}. Using memory cache.")
+
+        message = media_meta["message_object"]
+        file_name = media_meta["file_name"]
+        file_size = media_meta["file_size"]
+        mime_type = media_meta["mime_type"]
+
+        # ================================================================= #
+        # VVVVVV YAHAN PAR HAI ASLI JAADU - RANGE REQUEST HANDLING VVVVVV #
+        # ================================================================= #
+
+        range_header = request.headers.get("Range")
+        if range_header:
+            from_bytes, until_bytes = 0, file_size - 1
+            try:
+                range_bytes = range_header.split("=")[1]
+                from_bytes = int(range_bytes.split("-")[0])
+                if len(range_bytes.split("-")) > 1 and range_bytes.split("-")[1]:
+                    until_bytes = int(range_bytes.split("-")[1])
+            except (ValueError, IndexError):
+                return web.Response(status=400, text="Invalid Range header.")
+
+            if (from_bytes >= file_size) or (until_bytes >= file_size):
+                return web.Response(status=416)
+
+            chunk_size = until_bytes - from_bytes + 1
+            offset = from_bytes
+            status = 206  # Partial Content
+            headers = {
+                "Content-Type": mime_type,
+                "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                "Content-Length": str(chunk_size),
+                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+                "Accept-Ranges": "bytes"
+            }
+        else:
+            headers = {
+                "Content-Type": mime_type,
+                "Content-Disposition": f'{disposition}; filename="{file_name}"',
+                "Content-Length": str(file_size)
+            }
+            offset = 0
+            status = 200
         
-        media_meta = await get_media_meta(message_id, bot)
-        
-        headers = {
-            "Content-Type": media_meta["mime_type"],
-            "Content-Disposition": f'{disposition}; filename="{media_meta["file_name"]}"',
-            "Content-Length": str(media_meta["file_size"]),
-            "Accept-Ranges": "bytes", # Seeking ke liye zaroori
-        }
-        
-        response = web.StreamResponse(status=200, headers=headers)
+        response = web.StreamResponse(status=status, headers=headers)
         await response.prepare(request)
         
-        queue = producer_info['queue']
-
-        # ================================================================= #
-        # VVVVVV YAHAN PAR '_aiter_' KO SAHI TAREEKE SE REPLACE KIYA GAYA HAI VVVVVV #
-        # ================================================================= #
+        # Pyrogram ke stable stream_media ko calculated offset ke saath istemal karein
+        streamer = bot.stream_media(message, offset=offset)
         
-        # Standard aur robust tareeka queue se data nikalne ka
-        while True:
-            chunk = await queue.get()
-            
-            # Agar chunk None hai, iska matlab download poora ho gaya
-            if chunk is None:
-                break
-            
+        async for chunk in streamer:
             try:
                 await response.write(chunk)
-                await asyncio.sleep(0)
+                await asyncio.sleep(0) # Smooth pipeline ke liye
             except (ConnectionError, asyncio.CancelledError):
-                logger.warning(f"Consumer for message {message_id} disconnected.")
+                logger.warning(f"Client disconnected for message {message_id}. Stopping stream.")
                 break
         
         return response
