@@ -60,7 +60,11 @@ class Bot(Client):
             if not messages: return
             
             first_filename = getattr(messages[0], messages[0].media.value).file_name
-            batch_display_title, _ = clean_filename(first_filename)
+            
+            # ================================================================= #
+            # VVVVVV YAHAN PAR FIX KIYA GAYA HAI - Ab 3 values unpack honge VVVVVV #
+            # ================================================================= #
+            batch_display_title, _, _ = clean_filename(first_filename)
 
             user = await get_user(user_id)
             post_channels = user.get('post_channels', [])
@@ -83,7 +87,8 @@ class Bot(Client):
                     if poster: await self.send_with_protection(self.send_photo, channel_id, poster, caption=caption, reply_markup=footer)
                     else: await self.send_with_protection(self.send_message, channel_id, caption, reply_markup=footer, disable_web_page_preview=True)
                     await asyncio.sleep(2)
-        except Exception as e: logger.exception(f"Error finalizing batch {batch_key}: {e}")
+        except Exception as e: 
+            logger.exception(f"Error finalizing batch {batch_key}: {e}")
         finally:
             for sent_msg in notification_messages:
                 await self.send_with_protection(sent_msg.delete)
@@ -99,20 +104,20 @@ class Bot(Client):
                 if not self.owner_db_channel_id: self.owner_db_channel_id = await get_owner_db_channel()
                 if not self.owner_db_channel_id:
                     logger.error("Owner DB Channel is mandatory and not set. File processing skipped.")
-                    self.file_queue.task_done() # <-- Yahan add kiya
+                    self.file_queue.task_done()
                     continue
 
                 if not self.stream_channel_id: self.stream_channel_id = await get_stream_channel()
                 
                 copied_message = await self.send_with_protection(message.copy, self.owner_db_channel_id)
                 if not copied_message: 
-                    self.file_queue.task_done() # <-- Yahan add kiya
+                    self.file_queue.task_done()
                     continue
 
                 if self.stream_channel_id and self.stream_channel_id != self.owner_db_channel_id:
                     stream_message = await self.send_with_protection(message.copy, self.stream_channel_id)
                     if not stream_message: 
-                        self.file_queue.task_done() # <-- Yahan add kiya
+                        self.file_queue.task_done()
                         continue
                 else:
                     stream_message = copied_message
@@ -123,7 +128,7 @@ class Bot(Client):
                 title_key = get_title_key(filename)
                 if not title_key:
                     logger.warning(f"Could not generate a title key for filename: {filename}")
-                    self.file_queue.task_done() # <-- Yahan add kiya
+                    self.file_queue.task_done()
                     continue
 
                 self.open_batches.setdefault(user_id, {})
@@ -142,12 +147,10 @@ class Bot(Client):
                     }
                     logger.info(f"Created new batch with key '{title_key}'")
                 
-                # Yeh line 'finally' block se yahan move ki gayi hai
                 self.file_queue.task_done()
 
             except Exception as e:
                 logger.exception(f"CRITICAL Error in file_processor_worker: {e}")
-                # Agar exception aati hai to task_done call nahi hona chahiye, isliye yahan kuch nahi hai
 
     async def send_with_protection(self, coro, *args, **kwargs):
         while True:
