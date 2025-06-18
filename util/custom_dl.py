@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import aiofiles
+import aiohttp # <-- aiohttp import zaroori hai
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.types import Message
@@ -24,7 +25,6 @@ class ByteStreamer:
             raise ValueError("Neither Stream Channel nor Owner DB Channel is configured.")
         return await self.client.get_messages(stream_channel, message_id)
 
-    # --- MODIFIED: This function now handles both streaming and downloading ---
     async def handle_stream_and_download(self, request: web.Request, message_id: int, disposition: str) -> web.StreamResponse:
         """
         Handles both streaming ('inline') and downloading ('attachment').
@@ -78,12 +78,21 @@ class ByteStreamer:
                     os.rename(temp_file_path, file_path)
                     logger.info(f"Caching complete for message_id: {message_id}")
 
-                except (ConnectionResetError, asyncio.CancelledError, BrokenPipeError):
-                    logger.warning(f"Client disconnected during stream/cache for message_id: {message_id}. This is normal.")
+                # ================================================================= #
+                # VVVVVV YAHAN PAR CHAMPION PRO FIX LAGA DIYA GAYA HAI VVVVVV #
+                # ================================================================= #
+                except (asyncio.CancelledError, ConnectionError, aiohttp.ClientError) as e:
+                    logger.warning(
+                        f"Client disconnected or connection error during stream for message_id {message_id}. "
+                        f"Error Type: {type(e).__name__}. This is a normal event and not a bot failure."
+                    )
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
+                # ================================================================= #
+                # ^^^^^^ YAHI HAI ASLI FIX, JO SAB CONNECTION ERRORS SAMBHAL LEGA ^^^^^^ #
+                # ================================================================= #
                 except Exception as e:
-                    logger.exception(f"An unexpected error occurred during stream/cache for message_id {message_id}: {e}")
+                    logger.exception(f"A truly unexpected error occurred during stream/cache for message_id {message_id}: {e}")
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                 
